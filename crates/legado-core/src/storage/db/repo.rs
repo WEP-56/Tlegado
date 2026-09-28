@@ -63,6 +63,16 @@ impl BookSourceRepo {
         Ok(())
     }
 
+    pub async fn delete_many(&self, user_ns: &str, keys: &[String]) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await?;
+        for key in keys {
+            sqlx::query("DELETE FROM book_sources WHERE user_ns=?1 AND book_source_url=?2")
+                .bind(user_ns).bind(key).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn get(
         &self,
         user_ns: &str,
@@ -119,6 +129,24 @@ impl BookSourceRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_delete_batch_rolls_back_and_respects_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = super::super::init_pool(temp.path().join("sources.db").to_str().unwrap()).await.unwrap();
+        let repo = BookSourceRepo::new(pool.clone());
+        let sources = ["accept", "reject"].map(|url| BookSource { book_source_url: url.into(), book_source_name: url.into(), ..Default::default() });
+        repo.upsert_many("default", &sources).await.unwrap();
+        repo.upsert_many("other", &sources).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_delete BEFORE DELETE ON book_sources WHEN OLD.book_source_url = 'reject' BEGIN SELECT RAISE(ABORT, 'test rejection'); END").execute(&pool).await.unwrap();
+        assert!(repo.delete_many("default", &["accept".into(), "reject".into()]).await.is_err());
+        assert_eq!(repo.list("default").await.unwrap().len(), 2);
+        sqlx::query("DROP TRIGGER reject_delete").execute(&pool).await.unwrap();
+        repo.delete_many("default", &["accept".into(), "reject".into()]).await.unwrap();
+        assert!(repo.list("default").await.unwrap().is_empty());
+        assert_eq!(repo.list("other").await.unwrap().len(), 2);
+        pool.close().await;
+    }
 
     #[tokio::test]
     async fn failed_batch_rolls_back_earlier_inserts() {

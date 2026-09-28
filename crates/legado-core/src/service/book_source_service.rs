@@ -119,6 +119,10 @@ impl BookSourceService {
         self.repo.delete_all(user_ns).await
     }
 
+    pub async fn delete_many(&self, user_ns: &str, keys: &[String]) -> Result<(), AppError> {
+        self.repo.delete_many(user_ns, keys).await
+    }
+
     /// Copy sources from one user to another (used for setting default sources)
     pub async fn copy_to(&self, from_ns: &str, to_ns: &str) -> Result<i64, AppError> {
         self.repo.copy_to(from_ns, to_ns).await

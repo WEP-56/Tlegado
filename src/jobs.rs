@@ -39,10 +39,12 @@ pub enum Command {
     Cancel,
     Import(PathBuf),
     Export(PathBuf),
-    Toggle {
-        key: String,
+    SetSources {
+        keys: Vec<String>,
         explore: bool,
+        enabled: bool,
     },
+    DeleteSources(Vec<String>),
     Add(Book),
     Remove(Book),
     Progress {
@@ -290,16 +292,19 @@ async fn run(
                             let _ =
                                 tx.send(Event::Notice(format!("书源已导出到 {}", path.display())));
                         }
-                        Command::Toggle { key, explore } => {
-                            let mut source = backend.source(&key).await?;
-                            if explore {
-                                source.enabled_explore =
-                                    Some(source.enabled_explore == Some(false));
-                            } else {
-                                source.enabled = Some(!source.is_enabled());
-                            }
-                            backend.sources.save(NAMESPACE, source).await?;
+                        Command::SetSources {
+                            keys,
+                            explore,
+                            enabled,
+                        } => {
+                            backend.set_sources(&keys, explore, enabled).await?;
                             let _ = tx.send(Event::Snapshot(backend.snapshot().await?));
+                            let _ = tx.send(Event::Notice(format!("已更新 {} 个书源", keys.len())));
+                        }
+                        Command::DeleteSources(keys) => {
+                            backend.sources.delete_many(NAMESPACE, &keys).await?;
+                            let _ = tx.send(Event::Snapshot(backend.snapshot().await?));
+                            let _ = tx.send(Event::Notice(format!("已删除 {} 个书源", keys.len())));
                         }
                         Command::Add(book) => {
                             backend.books.save_book(NAMESPACE, book).await?;

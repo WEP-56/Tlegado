@@ -17,3 +17,12 @@ test verifies rollback when an insert fails after an earlier successful insert.
 The HTTP fetcher uses tracing debug events instead of raw terminal prints. These
 events omit request URLs and bodies. A subprocess regression test runs GET, POST
 and retried HTTP failures without output capture to check for terminal pollution.
+
+JavaScript HTTP bridges (java.ajax, java.get and remote jsLib loading) now keep
+blocking reqwest construction, requests and response reads outside Tokio async
+contexts. Multi-thread runtimes yield their worker via block_in_place while the
+plain HTTP thread runs, and requests have a 15-second timeout. A fresh-process
+test covers first initialization and repeated calls on both runtime flavors.
+
+BookSourceRepo/BookSourceService::delete_many delete explicit URL keys within one
+SQLite transaction; a trigger-based test verifies rollback and namespace isolation.

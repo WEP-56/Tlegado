@@ -120,6 +120,21 @@ impl Backend {
             .context("找不到该书籍的书源，请重新导入")
     }
 
+    pub async fn set_sources(&self, keys: &[String], explore: bool, enabled: bool) -> Result<()> {
+        let mut sources = self.sources.list(NAMESPACE).await?;
+        let keys: std::collections::HashSet<_> = keys.iter().collect();
+        sources.retain(|s| keys.contains(&s.book_source_url));
+        for source in &mut sources {
+            if explore {
+                source.enabled_explore = Some(enabled);
+            } else {
+                source.enabled = Some(enabled);
+            }
+        }
+        self.sources.save_many(NAMESPACE, sources).await?;
+        Ok(())
+    }
+
     pub async fn search(
         &self,
         source: &BookSource,
@@ -321,6 +336,58 @@ mod tests {
         assert!(parse_sources(r#"[{"bookSourceName":"正常","bookSourceUrl":"x"},{}]"#).is_err());
         assert!(parse_sources("[]").is_err());
         assert!(parse_sources("null").is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_source_changes_persist_and_preserve_books() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Backend::open(temp.path()).await.unwrap();
+        let sources = (0..3)
+            .map(|i| BookSource {
+                book_source_name: format!("源{i}"),
+                book_source_url: format!("source-{i}"),
+                enabled: Some(true),
+                enabled_explore: Some(true),
+                ..Default::default()
+            })
+            .collect();
+        backend.sources.save_many(NAMESPACE, sources).await.unwrap();
+        backend
+            .save_progress(
+                Book {
+                    name: "保留的书".into(),
+                    book_url: "book".into(),
+                    origin: "source-0".into(),
+                    ..Default::default()
+                },
+                0,
+                12,
+                "正文".into(),
+            )
+            .await
+            .unwrap();
+        let keys = vec!["source-0".into(), "source-2".into()];
+        backend.set_sources(&keys, false, false).await.unwrap();
+        backend.set_sources(&keys, true, false).await.unwrap();
+        drop(backend);
+        let reopened = Backend::open(temp.path()).await.unwrap();
+        assert!(!reopened.source("source-0").await.unwrap().is_enabled());
+        assert_eq!(
+            reopened.source("source-2").await.unwrap().enabled_explore,
+            Some(false)
+        );
+        assert!(reopened.source("source-1").await.unwrap().is_enabled());
+        reopened
+            .sources
+            .delete_many(NAMESPACE, &keys)
+            .await
+            .unwrap();
+        assert_eq!(reopened.sources.list(NAMESPACE).await.unwrap().len(), 1);
+        assert_eq!(reopened.shelf().await.unwrap()[0].dur_chapter_pos, Some(12));
+        drop(reopened);
+        let reopened = Backend::open(temp.path()).await.unwrap();
+        assert!(reopened.source("source-0").await.is_err());
+        assert_eq!(reopened.sources.list(NAMESPACE).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

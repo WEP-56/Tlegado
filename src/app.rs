@@ -14,6 +14,7 @@ pub enum Route {
     Home,
     Shelf { filter: ShelfFilter },
     Discover { source_idx: usize },
+    ExploreSources,
     Search,
     History,
     Sources,
@@ -45,6 +46,7 @@ pub struct App {
     pub reader: Option<crate::reader::Reader>,
     pub books: Vec<Book>,
     pub sources: Vec<Source>,
+    pub source_browser: crate::sources::SourceBrowser,
 
     pub focus: Focus,
     pub nav: Vec<NavItem>,
@@ -86,6 +88,7 @@ impl App {
             reader: None,
             books,
             sources,
+            source_browser: crate::sources::SourceBrowser::default(),
             focus: Focus::Sidebar,
             nav: Vec::new(),
             nav_idx: 0,
@@ -164,8 +167,24 @@ impl App {
             right: "/".into(),
         });
 
+        items.push(NavItem {
+            id: "discover:sources".into(),
+            section: Some("发现"),
+            label: "探索书源".into(),
+            route: Route::ExploreSources,
+            right: self
+                .sources
+                .iter()
+                .filter(|s| s.enabled && s.explore && !s.categories.is_empty())
+                .count()
+                .to_string(),
+        });
         for (i, s) in self.sources.iter().enumerate() {
-            if s.enabled && s.explore && !s.categories.is_empty() {
+            if self.source_browser.active_explore.as_deref() == Some(s.id.as_str())
+                && s.enabled
+                && s.explore
+                && !s.categories.is_empty()
+            {
                 items.push(NavItem {
                     id: format!("discover:{}", s.id),
                     section: Some("发现"),
@@ -217,7 +236,14 @@ impl App {
             if let Some(i) = self.nav.iter().position(|n| n.id == id) {
                 self.nav_idx = i;
             } else {
-                self.nav_idx = self.nav_idx.min(self.nav.len().saturating_sub(1));
+                self.nav_idx = if id.starts_with("discover:") {
+                    self.nav
+                        .iter()
+                        .position(|n| n.id == "discover:sources")
+                        .unwrap_or(0)
+                } else {
+                    self.nav_idx.min(self.nav.len().saturating_sub(1))
+                };
             }
         }
     }
@@ -260,6 +286,9 @@ impl App {
     // ── 按键 ────────────────────────────────────────────────
     pub fn on_key(&mut self, key: KeyEvent) {
         if self.live_key(key) {
+            return;
+        }
+        if self.source_browser_key(key) {
             return;
         }
         // Ctrl+B 切侧栏
@@ -416,6 +445,7 @@ impl App {
             Route::Home => self.on_key_home(key),
             Route::Shelf { filter } => self.on_key_shelf(key, filter),
             Route::Discover { source_idx } => self.on_key_discover(key, source_idx),
+            Route::ExploreSources => {}
             Route::Search => self.on_key_search(key),
             Route::History | Route::Sources | Route::Purify | Route::Prefs => {
                 self.demo_key(key.code)
@@ -427,15 +457,7 @@ impl App {
         match key.code {
             KeyCode::Char('b') => self.goto_id("shelf:all"),
             KeyCode::Char('e') => {
-                if let Some(i) = self
-                    .nav
-                    .iter()
-                    .position(|n| matches!(n.route, Route::Discover { .. }))
-                {
-                    self.nav_idx = i;
-                } else {
-                    self.goto_id("discover:search");
-                }
+                self.goto_id("discover:sources");
             }
             KeyCode::Char('s') => self.goto_id("set:sources"),
             KeyCode::Char('o') => {
@@ -663,7 +685,7 @@ impl App {
         }
     }
 
-    fn goto_id(&mut self, id: &str) {
+    pub(crate) fn goto_id(&mut self, id: &str) {
         if let Some(i) = self.nav.iter().position(|n| n.id == id) {
             self.nav_idx = i;
             self.focus = Focus::Main;
@@ -842,7 +864,8 @@ mod reader_tests {
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.reader.as_ref().unwrap().book.title, "三体");
         key(&mut app, KeyCode::Esc);
-        app.goto_id("discover:s1");
+        app.goto_id("discover:sources");
+        key(&mut app, KeyCode::Enter);
         let expected = app.discover_list(0)[0].title.clone();
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.reader.as_ref().unwrap().book.title, expected);

@@ -1,11 +1,13 @@
 //! Tlegado: native terminal reader with a headless Legado core.
 mod app;
 mod backend;
+mod book_logo;
 mod data;
 mod demo;
 mod jobs;
 mod live;
 mod reader;
+mod sources;
 mod theme;
 mod ui;
 
@@ -29,7 +31,9 @@ const HELP: &str = "Tlegado — Legado 书源终端阅读器
 
 默认启动真实模式，无内置书源。数据保存在 ~/.tlegado，或 TLEGADO_DATA_DIR。
 --import-source 可重复指定；--import-only 导入后退出，不打开终端界面。
-书源管理：i 导入、o 导出、空格启停、e 探索开关、v 查看完整 JSON。
+书源管理：/ 筛选、空格多选、a 全选筛选结果、Enter 启停、+/- 批量启停。
+e 探索开关、E 关闭探索、x 确认删除、i 导入、o 导出全部、v 查看 JSON。
+探索书源统一在“探索书源”列表中选择，分类页 Backspace 返回列表。
 / 搜索；Enter 打开并自动加入书架；阅读中 [ / ] 切章，q 返回。
 Esc 取消后台读取；Ctrl+C 保存进度并退出。--demo 为原离线演示。
 ";
@@ -66,6 +70,7 @@ fn main() -> Result<()> {
             Ok(())
         });
     }
+    install_panic_hook((!options.demo).then_some(options.data_dir.as_path()))?;
     let bridge = if options.demo {
         None
     } else {
@@ -76,11 +81,6 @@ fn main() -> Result<()> {
     } else {
         App::new_live()
     };
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        previous_hook(info);
-    }));
     let result = (|| -> Result<()> {
         enable_raw_mode()?;
         let _session = TerminalSession;
@@ -94,6 +94,35 @@ fn main() -> Result<()> {
     let flush = dispatch(&mut app, bridge.as_ref());
     let shutdown = bridge.map(jobs::Bridge::finish).unwrap_or(Ok(()));
     result.and(flush).and(shutdown)
+}
+
+fn install_panic_hook(data_dir: Option<&std::path::Path>) -> Result<()> {
+    // A caught background panic must never tear down the UI thread's terminal.
+    let ui_thread = std::thread::current().id();
+    let panic_log = std::sync::Mutex::new(if let Some(data_dir) = data_dir {
+        std::fs::create_dir_all(data_dir)?;
+        Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(data_dir.join("panic.log"))?,
+        )
+    } else {
+        None
+    });
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        if std::thread::current().id() == ui_thread {
+            restore_terminal();
+            previous_hook(info);
+        } else if let Ok(mut log) = panic_log.lock() {
+            if let Some(log) = log.as_mut() {
+                let _ = writeln!(log, "{} {info}", chrono::Local::now());
+            }
+        }
+    }));
+    Ok(())
 }
 
 fn dispatch(app: &mut App, bridge: Option<&jobs::Bridge>) -> Result<()> {
@@ -150,4 +179,42 @@ fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    #[test]
+    fn caught_worker_panic_never_writes_terminal_controls() {
+        const CHILD: &str = "TLEGADO_PANIC_HOOK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "terminal_tests::caught_worker_panic_never_writes_terminal_controls",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(stderr.is_empty(), "{stderr}");
+            assert!(!stdout.contains('\x1b') && !stdout.contains("worker-panic-marker"));
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        super::install_panic_hook(Some(temp.path())).unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let result = tokio::spawn(async {
+                panic!("worker-panic-marker");
+            })
+            .await;
+            assert!(result.unwrap_err().is_panic());
+            assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
+        });
+        assert!(std::fs::read_to_string(temp.path().join("panic.log"))
+            .unwrap()
+            .contains("worker-panic-marker"));
+    }
 }

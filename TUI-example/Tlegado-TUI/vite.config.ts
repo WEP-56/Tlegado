@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 
 // https://vite.dev/config/
 export default defineConfig({
-  // Relative assets work under GitHub Pages' /Tlegado/ project path.
+  // Relative assets keep the prototype deployable under GitHub Pages.
   base: "./",
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {

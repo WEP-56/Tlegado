@@ -38,6 +38,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_body(f, app, chunks[2]);
     draw_footer(f, app, chunks[3]);
 
+    if crate::sources::draw_confirmation(f, app, area) {
+        return;
+    }
+
     if let Some(input) = app.live.as_ref().and_then(|l| l.prompt.as_ref()) {
         let rect = center_rect(area, 76, 8);
         ratatui::widgets::Clear.render(rect, f.buffer_mut());
@@ -62,7 +66,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     if app.help {
-        if app.reader.is_some() {
+        if app.reader.is_none()
+            && (matches!(app.route(), Route::ExploreSources)
+                || (app.live.is_some() && matches!(app.route(), Route::Sources)))
+        {
+            crate::sources::draw_help(f, area);
+        } else if app.reader.is_some() {
             draw_reader_help(f, area);
         } else {
             draw_help(f, area);
@@ -324,7 +333,11 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         Route::Home => draw_home(f, app, body),
         Route::Shelf { filter } => draw_shelf(f, app, body, filter),
         Route::Discover { source_idx } => draw_discover(f, app, body, source_idx),
+        Route::ExploreSources => crate::sources::draw(f, app, body),
         Route::Search => draw_search(f, app, body),
+        Route::Sources if app.live.is_some() && !app.demo.json => {
+            crate::sources::draw(f, app, body)
+        }
         Route::History | Route::Sources | Route::Purify | Route::Prefs => {
             crate::demo::draw(f, app, body)
         }
@@ -348,22 +361,22 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
     let enabled = app.sources.iter().filter(|s| s.enabled).count();
     let updates: u32 = app.books.iter().map(|b| b.new_count).sum();
 
-    let logo = [
-        r"   .·''''''·. .·''''''·.",
-        r"  :  ·····   :   ·····  :",
-        r"  :  ····    :   ·····  :",
-        r"  :  ·····   :   ···    :",
-        r"  :  ···     :   ·····  :",
-        r"  :  ·····   :   ····   :",
-        r"  '·.......·' '·.......·'",
-        r"         '·.___.·'",
-    ];
+    // The animated logo gets its own column. On narrow terminals it is hidden
+    // completely so its Braille cells cannot collide with the welcome copy.
+    let content = if inner.width >= 86 {
+        let logo_area = Rect::new(inner.x + 1, inner.y + 1, 34, inner.height.min(12));
+        crate::book_logo::render(f.buffer_mut(), logo_area, app.tick as i64 * 100);
+        Rect::new(
+            inner.x + 38,
+            inner.y + 1,
+            inner.width.saturating_sub(39),
+            inner.height.saturating_sub(2),
+        )
+    } else {
+        inset(inner, 2, 1)
+    };
 
     let mut lines: Vec<Line> = Vec::new();
-    // logo + 说明并排有点难，这里简单上下排
-    for l in &logo {
-        lines.push(Line::from(Span::styled(*l, s(THEME.mute))));
-    }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(
@@ -443,8 +456,45 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(
         Paragraph::new(lines).style(sbg(THEME.fg, THEME.bg)),
-        inset(inner, 2, 1),
+        content,
     );
+}
+
+#[cfg(test)]
+mod home_layout_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn has_braille(terminal: &Terminal<TestBackend>) -> bool {
+        terminal.backend().buffer().content.iter().any(|cell| {
+            cell.symbol()
+                .chars()
+                .next()
+                .is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+        })
+    }
+
+    #[test]
+    fn home_logo_has_a_separate_wide_column_and_is_hidden_when_narrow() {
+        for (width, expected_logo) in [(80, false), (140, true)] {
+            let mut app = App::new();
+            app.focus = Focus::Main;
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            terminal
+                .draw(|frame| draw_home(frame, &mut app, frame.area()))
+                .unwrap();
+            assert_eq!(has_braille(&terminal), expected_logo, "width={width}");
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            assert!(text.contains("基于 legado"));
+            assert!(text.contains("快捷键帮助"));
+        }
+    }
 }
 
 // ── 书架 ────────────────────────────────────────────────────

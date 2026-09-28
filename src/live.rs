@@ -141,6 +141,9 @@ impl App {
             self.should_quit = true;
             return true;
         }
+        if self.source_browser.editing || self.source_browser.delete.is_some() {
+            return false;
+        }
         if self.live.as_ref().unwrap().prompt.is_some() {
             match key.code {
                 KeyCode::Esc => self.live.as_mut().unwrap().prompt = None,
@@ -231,18 +234,7 @@ impl App {
                 });
                 true
             }
-            (Route::Sources, KeyCode::Enter | KeyCode::Char(' ' | 'e')) => {
-                if self.demo.json {
-                    return true;
-                }
-                if let Some(source) = self.sources.get(self.demo.source_sel) {
-                    self.commands.push(Command::Toggle {
-                        key: source.id.clone(),
-                        explore: key.code == KeyCode::Char('e'),
-                    });
-                }
-                true
-            }
+            (Route::Sources, KeyCode::Enter | KeyCode::Char(' ' | 'e')) if self.demo.json => true,
             (Route::Sources, KeyCode::Char('t' | 'T' | 'c')) => {
                 self.toast(
                     "书源批量校验将在下一阶段接入；可先通过搜索检查规则",
@@ -478,6 +470,10 @@ impl App {
                 sources,
                 categories,
             }) => {
+                let focused_source = self
+                    .source_indices()
+                    .get(self.source_browser.cursor)
+                    .map(|&i| self.sources[i].id.clone());
                 self.sources = sources
                     .iter()
                     .enumerate()
@@ -498,6 +494,18 @@ impl App {
                 live.ready = true;
                 live.sources = sources;
                 live.categories = categories;
+                self.source_browser
+                    .selected
+                    .retain(|id| self.sources.iter().any(|s| &s.id == id));
+                let visible = self.source_indices();
+                self.source_browser.cursor = focused_source
+                    .and_then(|id| visible.iter().position(|&i| self.sources[i].id == id))
+                    .unwrap_or(
+                        self.source_browser
+                            .cursor
+                            .min(visible.len().saturating_sub(1)),
+                    );
+                let live = self.live.as_mut().unwrap();
                 live.status = if self.sources.is_empty() {
                     "书源管理按 i 导入 JSON；/ 搜索书籍".into()
                 } else {
@@ -700,6 +708,8 @@ mod tests {
         app.rebuild_nav();
         app.goto_id_for_test("home");
         app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(matches!(app.route(), Route::ExploreSources));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.route(), Route::Discover { source_idx: 0 }));
     }
 
@@ -756,9 +766,12 @@ mod tests {
         assert!(app.commands.is_empty());
         app.demo.json = false;
         app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.source_browser.selected.len(), 1);
+        assert!(app.commands.is_empty());
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
             app.commands.last(),
-            Some(Command::Toggle { explore: false, .. })
+            Some(Command::SetSources { explore: false, .. })
         ));
         assert_eq!(
             app.sources[0].enabled, enabled,

@@ -3,17 +3,9 @@ import { cn } from "@/utils/cn";
 import { useApp } from "@/store";
 import { Box, useKeys } from "@/components/tui";
 import { chapterTitle } from "@/data/mock";
+import { BookLogo } from "@/components/BookLogo";
 
-const LOGO = [
-  "   .·''''''·. .·''''''·.",
-  "  :  ·····   :   ·····  :",
-  "  :  ····    :   ·····  :",
-  "  :  ·····   :   ···    :",
-  "  :  ···     :   ·····  :",
-  "  :  ·····   :   ····   :",
-  "  '·.......·' '·.......·'",
-  "         '·.___.·'",
-];
+
 
 export function Welcome({ focused }: { focused: boolean }) {
   const { books, sources, history, openReader, navigate, showHelp, toast } = useApp();
@@ -48,7 +40,7 @@ export function Welcome({ focused }: { focused: boolean }) {
     <div className="fade-in flex h-full flex-col overflow-y-auto px-2 pt-4">
       <Box className="px-6 py-6" active={focused}>
         <div className="flex gap-8">
-          <pre className="hidden shrink-0 text-[13px] leading-[1.35] text-mute md:block">{LOGO.join("\n")}</pre>
+          <BookLogo className="-my-2 hidden self-center md:block" pageBase={last ? last.read : 0} />
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline gap-3">
               <span className="font-bold text-hi">Tlegado</span>

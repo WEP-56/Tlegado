@@ -28,6 +28,7 @@ static JS_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .gzip(true)
         .brotli(true)
         .deflate(true)
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("failed to build JS HTTP client")
 });
@@ -560,8 +561,7 @@ fn compile_js_lib(js_lib: &str) -> anyhow::Result<String> {
 fn resolve_js_lib_entry(entry: &str) -> anyhow::Result<String> {
     let value = entry.trim();
     if value.starts_with("http://") || value.starts_with("https://") {
-        let response = JS_HTTP_CLIENT.get(value).send()?;
-        return Ok(response.text().unwrap_or_default());
+        return blocking_http(|| Ok(JS_HTTP_CLIENT.get(value).send()?.text()?));
     }
     Ok(value.to_string())
 }
@@ -808,7 +808,28 @@ fn random_string(len: i32) -> String {
         .collect()
 }
 
+// reqwest's blocking client owns a Tokio runtime. Constructing or using it
+// inside an async task panics, including during Lazy's first initialization.
+// Keep client creation, response consumption and destruction on a plain thread.
+fn blocking_http<T: Send>(f: impl FnOnce() -> anyhow::Result<T> + Send) -> anyhow::Result<T> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let run = || std::thread::scope(|scope| {
+            scope.spawn(f).join().unwrap_or_else(|_| Err(anyhow::anyhow!("JavaScript HTTP worker panicked")))
+        });
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            // Let Tokio replace this worker while synchronous JavaScript waits.
+            tokio::task::block_in_place(run)
+        } else { run() }
+    } else {
+        f()
+    }
+}
+
 fn java_ajax(spec: &str) -> anyhow::Result<String> {
+    blocking_http(|| java_ajax_blocking(spec))
+}
+
+fn java_ajax_blocking(spec: &str) -> anyhow::Result<String> {
     let (url, options) = split_ajax_spec(spec);
     if url.trim().is_empty() {
         return Ok(String::new());
@@ -850,6 +871,10 @@ fn java_ajax(spec: &str) -> anyhow::Result<String> {
 }
 
 fn java_request_simple(method: &str, url: &str, body: Option<String>) -> anyhow::Result<String> {
+    blocking_http(|| java_request_simple_blocking(method, url, body))
+}
+
+fn java_request_simple_blocking(method: &str, url: &str, body: Option<String>) -> anyhow::Result<String> {
     let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
     let mut req = JS_HTTP_CLIENT.request(method, url.trim());
     if let Some(body) = body {
