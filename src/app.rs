@@ -1,361 +1,883 @@
-use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
-use ratatui::layout::Rect;
+//! 状态机 · 按键路由
 
-use crate::event::{is_left_click, Event};
+use crate::data::{self, Book, Kind, Source};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Debug, Clone, Copy)]
-pub struct NavEntry {
-    pub label: &'static str,
-    #[allow(dead_code)]
-    pub count: &'static str,
-    pub route: Route,
-}
-
-pub const NAV_ENTRIES: [NavEntry; 11] = [
-    NavEntry {
-        label: "首页",
-        count: "",
-        route: Route::Home,
-    },
-    NavEntry {
-        label: "全部书籍",
-        count: "10",
-        route: Route::Shelf,
-    },
-    NavEntry {
-        label: "本地书库",
-        count: "4",
-        route: Route::Shelf,
-    },
-    NavEntry {
-        label: "网络书库",
-        count: "+31",
-        route: Route::Shelf,
-    },
-    NavEntry {
-        label: "搜索书籍",
-        count: "/",
-        route: Route::Search,
-    },
-    NavEntry {
-        label: "起点中文网",
-        count: "7类",
-        route: Route::Search,
-    },
-    NavEntry {
-        label: "番茄小说",
-        count: "5类",
-        route: Route::Search,
-    },
-    NavEntry {
-        label: "笔趣阁①",
-        count: "6类",
-        route: Route::Search,
-    },
-    NavEntry {
-        label: "阅读历史",
-        count: "8",
-        route: Route::History,
-    },
-    NavEntry {
-        label: "书源管理",
-        count: "6/8",
-        route: Route::Sources,
-    },
-    NavEntry {
-        label: "阅读偏好",
-        count: "",
-        route: Route::Preferences,
-    },
-];
-
-#[derive(Debug, Clone, Copy)]
-pub enum HitTarget {
-    Sidebar(usize),
-    MainRow(usize),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HitRegion {
-    pub area: Rect,
-    pub target: HitTarget,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    Home,
-    Shelf,
-    Search,
-    History,
-    Sources,
-    Preferences,
-    Reader,
-}
-
-impl Route {
-    #[allow(dead_code)]
-    pub const ALL: [Self; 6] = [
-        Self::Home,
-        Self::Shelf,
-        Self::Search,
-        Self::History,
-        Self::Sources,
-        Self::Preferences,
-    ];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Home => "首页",
-            Self::Shelf => "书架",
-            Self::Search => "搜索",
-            Self::History => "阅读历史",
-            Self::Sources => "书源管理",
-            Self::Preferences => "阅读偏好",
-            Self::Reader => "阅读",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Sidebar,
     Main,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Action {
-    Key(KeyCode, KeyModifiers),
-    Mouse(MouseEventKind, u16, u16),
-    Resize(u16, u16),
+#[derive(Clone, PartialEq, Eq)]
+pub enum Route {
+    Home,
+    Shelf { filter: ShelfFilter },
+    Discover { source_idx: usize },
+    Search,
+    History,
+    Sources,
+    Purify,
+    Prefs,
 }
 
-impl From<Event> for Action {
-    fn from(event: Event) -> Self {
-        match event {
-            Event::Key(key) => Self::Key(key.code, key.modifiers),
-            Event::Mouse { kind, column, row } => Self::Mouse(kind, column, row),
-            Event::Resize(width, height) => Self::Resize(width, height),
-        }
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ShelfFilter {
+    All,
+    Local,
+    Network,
 }
 
-#[derive(Debug)]
-pub struct App {
+/// 侧栏每一项
+#[derive(Clone)]
+pub struct NavItem {
+    pub id: String,
+    pub section: Option<&'static str>, // None = 顶级（首页）
+    pub label: String,
     pub route: Route,
-    pub focus: Focus,
-    pub sidebar_visible: bool,
-    pub help_visible: bool,
-    pub should_quit: bool,
-    pub selected: usize,
-    pub main_selected: usize,
-    pub notice: Option<String>,
-    pub sidebar_area: Rect,
-    pub hit_regions: Vec<HitRegion>,
+    pub right: String,
 }
 
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            route: Route::Home,
-            focus: Focus::Sidebar,
-            sidebar_visible: true,
-            help_visible: false,
-            should_quit: false,
-            selected: 0,
-            main_selected: 0,
-            notice: Some("Tlegado TUI 骨架已启动".to_string()),
-            sidebar_area: Rect::default(),
-            hit_regions: Vec::new(),
-        }
-    }
+pub struct App {
+    pub demo: crate::demo::Demo,
+    pub reader: Option<crate::reader::Reader>,
+    pub books: Vec<Book>,
+    pub sources: Vec<Source>,
+
+    pub focus: Focus,
+    pub nav: Vec<NavItem>,
+    pub nav_idx: usize,
+    pub collapsed: std::collections::HashMap<&'static str, bool>,
+    pub sidebar_hidden: bool,
+
+    // 主体内的局部选中
+    pub shelf_group: usize, // 0 = 全部
+    pub shelf_sel: usize,
+    pub shelf_sort: usize,
+    pub discover_cat: usize,
+    pub discover_sel: usize,
+    pub search_sel: usize,
+    pub search_query: String,
+    pub search_input_mode: bool, // true = 正在输入
+
+    pub help: bool,
+    pub toast: Option<(String, ToastTone, u8)>, // msg, tone, ticks left
+    pub tick: u64,
+    pub should_quit: bool,
+}
+
+#[derive(Clone, Copy)]
+pub enum ToastTone {
+    Ok,
+    Err,
+    Info,
 }
 
 impl App {
-    pub fn dispatch(&mut self, action: Action) {
-        if self.help_visible {
-            if matches!(
-                action,
-                Action::Key(KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q'), _)
-            ) {
-                self.help_visible = false;
+    pub fn new() -> Self {
+        let books = data::shelf();
+        let sources = data::sources();
+        let mut app = Self {
+            demo: crate::demo::Demo::new(&books, sources.len()),
+            reader: None,
+            books,
+            sources,
+            focus: Focus::Sidebar,
+            nav: Vec::new(),
+            nav_idx: 0,
+            collapsed: std::collections::HashMap::new(),
+            sidebar_hidden: false,
+            shelf_group: 0,
+            shelf_sel: 0,
+            shelf_sort: 0,
+            discover_cat: 0,
+            discover_sel: 0,
+            search_sel: 0,
+            search_query: String::new(),
+            search_input_mode: false,
+            help: false,
+            toast: None,
+            tick: 0,
+            should_quit: false,
+        };
+        app.rebuild_nav();
+        app
+    }
+
+    pub fn rebuild_nav(&mut self) {
+        let cur_id = self.nav.get(self.nav_idx).map(|n| n.id.clone());
+        let mut items = Vec::new();
+
+        items.push(NavItem {
+            id: "home".into(),
+            section: None,
+            label: "首页".into(),
+            route: Route::Home,
+            right: String::new(),
+        });
+
+        let updates: u32 = self.books.iter().map(|b| b.new_count).sum();
+        let local = self.books.iter().filter(|b| b.kind == Kind::Local).count();
+        let total = self.books.len();
+
+        items.push(NavItem {
+            id: "shelf:all".into(),
+            section: Some("书架"),
+            label: "全部书籍".into(),
+            route: Route::Shelf {
+                filter: ShelfFilter::All,
+            },
+            right: total.to_string(),
+        });
+        items.push(NavItem {
+            id: "shelf:local".into(),
+            section: Some("书架"),
+            label: "本地图书".into(),
+            route: Route::Shelf {
+                filter: ShelfFilter::Local,
+            },
+            right: local.to_string(),
+        });
+        items.push(NavItem {
+            id: "shelf:network".into(),
+            section: Some("书架"),
+            label: "网络图书".into(),
+            route: Route::Shelf {
+                filter: ShelfFilter::Network,
+            },
+            right: if updates > 0 {
+                format!("+{updates} {}", total - local)
+            } else {
+                (total - local).to_string()
+            },
+        });
+
+        items.push(NavItem {
+            id: "discover:search".into(),
+            section: Some("发现"),
+            label: "搜索书籍".into(),
+            route: Route::Search,
+            right: "/".into(),
+        });
+
+        for (i, s) in self.sources.iter().enumerate() {
+            if s.enabled && s.explore && !s.categories.is_empty() {
+                items.push(NavItem {
+                    id: format!("discover:{}", s.id),
+                    section: Some("发现"),
+                    label: s.name.into(),
+                    route: Route::Discover { source_idx: i },
+                    right: format!("{}类", s.categories.len()),
+                });
+            }
+        }
+
+        let enabled = self.sources.iter().filter(|s| s.enabled).count();
+        items.push(NavItem {
+            id: "set:history".into(),
+            section: Some("设置"),
+            label: "阅读历史".into(),
+            route: Route::History,
+            right: self.demo.history.len().to_string(),
+        });
+        items.push(NavItem {
+            id: "set:sources".into(),
+            section: Some("设置"),
+            label: "书源管理".into(),
+            route: Route::Sources,
+            right: format!("{enabled}/{}", self.sources.len()),
+        });
+        items.push(NavItem {
+            id: "set:purify".into(),
+            section: Some("设置"),
+            label: "净化规则".into(),
+            route: Route::Purify,
+            right: self
+                .demo
+                .rules
+                .iter()
+                .filter(|r| r.enabled)
+                .count()
+                .to_string(),
+        });
+        items.push(NavItem {
+            id: "set:prefs".into(),
+            section: Some("设置"),
+            label: "阅读偏好".into(),
+            route: Route::Prefs,
+            right: String::new(),
+        });
+
+        self.nav = items;
+        if let Some(id) = cur_id {
+            if let Some(i) = self.nav.iter().position(|n| n.id == id) {
+                self.nav_idx = i;
+            } else {
+                self.nav_idx = self.nav_idx.min(self.nav.len().saturating_sub(1));
+            }
+        }
+    }
+
+    pub fn route(&self) -> &Route {
+        &self.nav[self.nav_idx].route
+    }
+
+    /// 可见的侧栏索引（折叠的 section 子项被跳过）
+    pub fn visible_nav(&self) -> Vec<usize> {
+        self.nav
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| match n.section {
+                Some(sec) => !self.collapsed.get(sec).copied().unwrap_or(false),
+                None => true,
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn toast(&mut self, msg: impl Into<String>, tone: ToastTone) {
+        // ~3 秒（假设 10 ticks/s → 30）
+        self.toast = Some((msg.into(), tone, 30));
+    }
+
+    pub fn on_tick(&mut self) {
+        self.demo.tick(&self.sources);
+        self.tick = self.tick.wrapping_add(1);
+        if let Some((_, _, ref mut left)) = self.toast {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                self.toast = None;
+            }
+        }
+    }
+
+    // ── 按键 ────────────────────────────────────────────────
+    pub fn on_key(&mut self, key: KeyEvent) {
+        // Ctrl+B 切侧栏
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') {
+            self.sidebar_hidden = !self.sidebar_hidden;
+            if self.sidebar_hidden {
+                self.focus = Focus::Main;
             }
             return;
         }
 
-        match action {
-            Action::Key(KeyCode::Char('q') | KeyCode::Esc, _) => {
-                if self.route == Route::Reader {
-                    self.select_route(Route::Shelf);
+        if self.help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => self.help = false,
+                _ => {}
+            }
+            return;
+        }
+
+        if self.reader.is_some() {
+            self.on_key_reader(key);
+            return;
+        }
+        if self.demo.json
+            && matches!(self.route(), Route::Sources)
+            && matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v')
+            )
+        {
+            self.demo.json = false;
+            self.demo.detail_scroll = 0;
+            return;
+        }
+
+        // 搜索输入模式：把字符吃进 query
+        if self.search_input_mode {
+            match key.code {
+                KeyCode::Esc | KeyCode::Tab => self.search_input_mode = false,
+                KeyCode::Enter => {
+                    self.search_input_mode = false;
+                    if self.search_query.trim().is_empty() {
+                        self.toast("请输入关键词", ToastTone::Err);
+                    } else {
+                        self.toast(
+                            format!(
+                                "搜索「{}」（演示：结果为本地过滤）",
+                                self.search_query.trim()
+                            ),
+                            ToastTone::Info,
+                        );
+                        self.search_sel = 0;
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.search_query.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Tab => {
+                if self.sidebar_hidden {
                     self.focus = Focus::Main;
                 } else {
-                    self.should_quit = true;
+                    self.focus = match self.focus {
+                        Focus::Sidebar => Focus::Main,
+                        Focus::Main => Focus::Sidebar,
+                    };
                 }
             }
-            Action::Key(KeyCode::Char('?'), _) => self.help_visible = true,
-            Action::Key(KeyCode::Char('b'), modifiers)
-                if modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.sidebar_visible = !self.sidebar_visible;
-                if !self.sidebar_visible {
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('/') => {
+                // 跳到搜索
+                if let Some(i) = self.nav.iter().position(|n| n.id == "discover:search") {
+                    self.nav_idx = i;
                     self.focus = Focus::Main;
+                    self.search_input_mode = true;
                 }
             }
-            Action::Key(KeyCode::Tab, _) => {
-                self.focus = match self.focus {
-                    Focus::Sidebar if self.sidebar_visible => Focus::Main,
-                    _ => Focus::Sidebar,
-                };
+            KeyCode::Char('q') if self.focus == Focus::Sidebar => self.should_quit = true,
+            KeyCode::Esc if self.focus == Focus::Main => {
+                if !self.sidebar_hidden {
+                    self.focus = Focus::Sidebar;
+                }
             }
-            Action::Key(KeyCode::Char('/'), _) => self.select_route(Route::Search),
-            Action::Key(code, _) => self.handle_key(code),
-            Action::Mouse(kind, column, row) => self.handle_mouse(kind, column, row),
-            Action::Resize(width, height) => {
-                self.notice = Some(format!("终端尺寸：{width}x{height}"));
-            }
-        }
-    }
-
-    pub fn set_sidebar_area(&mut self, area: Rect) {
-        self.sidebar_area = area;
-    }
-
-    pub fn begin_frame(&mut self) {
-        self.hit_regions.clear();
-    }
-
-    pub fn register_hit(&mut self, area: Rect, target: HitTarget) {
-        self.hit_regions.push(HitRegion { area, target });
-    }
-
-    fn handle_key(&mut self, code: KeyCode) {
-        match self.focus {
-            Focus::Sidebar => match code {
-                KeyCode::Down | KeyCode::Char('j') => self.move_sidebar(1),
-                KeyCode::Up | KeyCode::Char('k') => self.move_sidebar(-1),
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Main,
-                _ => {}
-            },
-            Focus::Main => match code {
-                KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.main_selected = self.main_selected.saturating_add(1);
-                    self.notice = Some("主体区域：下一项".to_string())
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.main_selected = self.main_selected.saturating_sub(1);
-                    self.notice = Some("主体区域：上一项".to_string())
-                }
-                KeyCode::Enter if self.route == Route::Shelf => {
-                    self.route = Route::Reader;
-                    self.notice = Some("正在阅读：诡秘之主 · 第813章 雾中来客".to_string());
-                }
-                KeyCode::Enter => self.notice = Some(format!("已打开{}", self.route.title())),
-                _ => {}
+            _ => match self.focus {
+                Focus::Sidebar => self.on_key_sidebar(key),
+                Focus::Main => self.on_key_main(key),
             },
         }
     }
 
-    fn handle_mouse(&mut self, kind: MouseEventKind, column: u16, row: u16) {
-        if is_left_click(kind) {
-            if let Some(region) = self
-                .hit_regions
-                .iter()
-                .rev()
-                .find(|region| region.area.contains((column, row).into()))
-                .copied()
-            {
-                match region.target {
-                    HitTarget::Sidebar(index) => self.select_entry(index),
-                    HitTarget::MainRow(index) => {
-                        self.main_selected = index;
-                        self.focus = Focus::Main;
-                        self.notice = Some(format!("已选择第 {} 项，按 Enter 打开", index + 1));
+    fn on_key_sidebar(&mut self, key: KeyEvent) {
+        let vis = self.visible_nav();
+        let pos = vis.iter().position(|&i| i == self.nav_idx).unwrap_or(0);
+        let move_by = |pos: usize, d: isize, vis: &[usize]| -> usize {
+            let np = (pos as isize + d).clamp(0, vis.len().saturating_sub(1) as isize) as usize;
+            vis[np]
+        };
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.nav_idx = move_by(pos, 1, &vis);
+                self.reset_main_sel();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.nav_idx = move_by(pos, -1, &vis);
+                self.reset_main_sel();
+            }
+            KeyCode::Char('g') => {
+                if let Some(&i) = vis.first() {
+                    self.nav_idx = i;
+                    self.reset_main_sel();
+                }
+            }
+            KeyCode::Char('G') => {
+                if let Some(&i) = vis.last() {
+                    self.nav_idx = i;
+                    self.reset_main_sel();
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                self.focus = Focus::Main;
+                if matches!(self.route(), Route::Search) {
+                    self.search_input_mode = true;
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Char(' ') => {
+                // 折叠 / 展开 section
+                if let Some(sec) = self.nav[self.nav_idx].section {
+                    let now = self.collapsed.get(sec).copied().unwrap_or(false);
+                    self.collapsed.insert(sec, !now);
+                    if !now {
+                        // 刚折叠：把光标移到该 section 第一项
+                        if let Some(i) = self.nav.iter().position(|n| n.section == Some(sec)) {
+                            self.nav_idx = i;
+                        }
                     }
                 }
             }
-        } else if matches!(kind, MouseEventKind::ScrollDown) {
-            if self.focus == Focus::Sidebar {
-                self.move_sidebar(1);
-            } else {
-                self.main_selected = self.main_selected.saturating_add(1);
-            }
-            self.notice = Some("向下滚动".to_string());
-        } else if matches!(kind, MouseEventKind::ScrollUp) {
-            if self.focus == Focus::Sidebar {
-                self.move_sidebar(-1);
-            } else {
-                self.main_selected = self.main_selected.saturating_sub(1);
-            }
-            self.notice = Some("向上滚动".to_string());
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
         }
     }
 
-    fn move_sidebar(&mut self, delta: i32) {
-        let max = NAV_ENTRIES.len().saturating_sub(1) as i32;
-        self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
-        self.route = NAV_ENTRIES[self.selected].route;
-    }
-
-    fn select_entry(&mut self, index: usize) {
-        if let Some(entry) = NAV_ENTRIES.get(index).copied() {
-            self.selected = index;
-            self.route = entry.route;
-            self.focus = Focus::Sidebar;
-            self.notice = Some(format!("当前页面：{}", entry.label));
+    fn on_key_main(&mut self, key: KeyEvent) {
+        match self.route().clone() {
+            Route::Home => self.on_key_home(key),
+            Route::Shelf { filter } => self.on_key_shelf(key, filter),
+            Route::Discover { source_idx } => self.on_key_discover(key, source_idx),
+            Route::Search => self.on_key_search(key),
+            Route::History | Route::Sources | Route::Purify | Route::Prefs => {
+                self.demo_key(key.code)
+            }
         }
     }
 
-    fn select_route(&mut self, route: Route) {
-        self.route = route;
-        self.selected = NAV_ENTRIES
+    fn on_key_home(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('b') => self.goto_id("shelf:all"),
+            KeyCode::Char('e') => {
+                if let Some(i) = self
+                    .nav
+                    .iter()
+                    .position(|n| n.id.starts_with("discover:s") && n.id != "discover:search")
+                {
+                    self.nav_idx = i;
+                } else {
+                    self.goto_id("discover:search");
+                }
+            }
+            KeyCode::Char('s') => self.goto_id("set:sources"),
+            KeyCode::Char('o') => {
+                self.toast("已扫描 ~/Books ，发现 2 本新书（演示）", ToastTone::Info)
+            }
+            KeyCode::Char('c') => {
+                if let Some(book) = self
+                    .demo
+                    .history
+                    .first()
+                    .map(|h| h.book.clone())
+                    .or_else(|| self.books.first().cloned())
+                {
+                    self.open_reader(book);
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Esc => self.focus = Focus::Sidebar,
+            _ => {}
+        }
+    }
+
+    fn on_key_shelf(&mut self, key: KeyEvent, filter: ShelfFilter) {
+        let list = self.shelf_list(filter);
+        let groups = self.shelf_groups(filter);
+        let len = list.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if len > 0 {
+                    self.shelf_sel = (self.shelf_sel + 1).min(len - 1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.shelf_sel = self.shelf_sel.saturating_sub(1);
+            }
+            KeyCode::Char('g') => self.shelf_sel = 0,
+            KeyCode::Char('G') => self.shelf_sel = len.saturating_sub(1),
+            KeyCode::Char('h') | KeyCode::Left => {
+                if !groups.is_empty() {
+                    self.shelf_group = (self.shelf_group + groups.len() - 1) % groups.len();
+                    self.shelf_sel = 0;
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if !groups.is_empty() {
+                    self.shelf_group = (self.shelf_group + 1) % groups.len();
+                    self.shelf_sel = 0;
+                }
+            }
+            KeyCode::Char('s') => {
+                self.shelf_sort = (self.shelf_sort + 1) % 4;
+                self.shelf_sel = 0;
+                let names = ["最近阅读", "书名", "更新数", "进度"];
+                self.toast(
+                    format!("排序 → {}", names[self.shelf_sort]),
+                    ToastTone::Info,
+                );
+            }
+            KeyCode::Char('r') => {
+                // 模拟检查更新
+                for b in &mut self.books {
+                    if b.kind == Kind::Network && b.status == "连载" {
+                        b.new_count += 1;
+                        b.total += 1;
+                    }
+                }
+                self.rebuild_nav();
+                self.toast("检查更新完成：3 本书有新章节", ToastTone::Ok);
+            }
+            KeyCode::Enter => {
+                if let Some(b) = list.get(self.shelf_sel) {
+                    self.open_reader((*b).clone());
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(b) = list.get(self.shelf_sel) {
+                    let id = b.id;
+                    let title = b.title.to_string();
+                    self.books.retain(|x| x.id != id);
+                    self.rebuild_nav();
+                    if self.shelf_sel >= self.shelf_list(filter).len() && self.shelf_sel > 0 {
+                        self.shelf_sel -= 1;
+                    }
+                    self.toast(format!("已移出《{title}》"), ToastTone::Err);
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Esc => self.focus = Focus::Sidebar,
+            _ => {}
+        }
+    }
+
+    fn on_key_discover(&mut self, key: KeyEvent, source_idx: usize) {
+        let cats = self
+            .sources
+            .get(source_idx)
+            .map(|s| s.categories)
+            .unwrap_or(&[]);
+        let books = self.discover_list(source_idx);
+        let len = books.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if len > 0 {
+                    self.discover_sel = (self.discover_sel + 1).min(len - 1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.discover_sel = self.discover_sel.saturating_sub(1);
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if !cats.is_empty() {
+                    self.discover_cat = (self.discover_cat + cats.len() - 1) % cats.len();
+                    self.discover_sel = 0;
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if !cats.is_empty() {
+                    self.discover_cat = (self.discover_cat + 1) % cats.len();
+                    self.discover_sel = 0;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(b) = books.get(self.discover_sel) {
+                    self.open_reader(b.clone());
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(b) = books.get(self.discover_sel) {
+                    self.add_demo_book(b.clone());
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Esc => self.focus = Focus::Sidebar,
+            _ => {}
+        }
+    }
+
+    fn on_key_search(&mut self, key: KeyEvent) {
+        let results = self.search_results();
+        let len = results.len();
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if len > 0 {
+                    self.search_sel = (self.search_sel + 1).min(len - 1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.search_sel = self.search_sel.saturating_sub(1);
+            }
+            KeyCode::Char('i') | KeyCode::Char('/') => {
+                self.search_input_mode = true;
+            }
+            KeyCode::Enter => {
+                if let Some(b) = results.get(self.search_sel) {
+                    self.open_reader((*b).clone());
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(b) = results.get(self.search_sel) {
+                    self.add_demo_book((*b).clone());
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Esc => self.focus = Focus::Sidebar,
+            _ => {}
+        }
+    }
+
+    pub(crate) fn open_reader(&mut self, book: Book) {
+        if book.total == 0 {
+            self.toast("暂无章节可预览", ToastTone::Info);
+            return;
+        }
+        self.reader = Some(crate::reader::Reader::new(book, self.sidebar_hidden));
+        if let Some(reader) = &mut self.reader {
+            reader.options = self.demo.prefs.clone();
+            reader.rules = self.demo.rules.clone();
+        }
+        self.sidebar_hidden = false;
+        self.focus = Focus::Main;
+        self.search_input_mode = false;
+        self.toast = None;
+    }
+
+    fn on_key_reader(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            if let Some(reader) = self.reader.take() {
+                self.demo.record(reader.book.clone(), reader.chapter);
+                self.sidebar_hidden = reader.previous_sidebar_hidden;
+                if let Some(book) = self.books.iter_mut().find(|b| b.id == reader.book.id) {
+                    book.read = reader.chapter;
+                }
+                self.rebuild_nav();
+            }
+            self.focus = Focus::Main;
+            return;
+        }
+        let reader = self.reader.as_mut().expect("active reader");
+        match key.code {
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.focus = if self.sidebar_hidden || self.focus == Focus::Sidebar {
+                    Focus::Main
+                } else {
+                    Focus::Sidebar
+                };
+            }
+            KeyCode::Char('t') => {
+                self.sidebar_hidden = false;
+                self.focus = Focus::Sidebar;
+                reader.selected = reader.chapter;
+            }
+            KeyCode::Char('[') => reader.change_chapter(-1),
+            KeyCode::Char(']') => reader.change_chapter(1),
+            _ if self.focus == Focus::Sidebar => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => reader.select(1),
+                KeyCode::Char('k') | KeyCode::Up => reader.select(-1),
+                KeyCode::PageDown => reader.select(10),
+                KeyCode::PageUp => reader.select(-10),
+                KeyCode::Char('g') | KeyCode::Home => reader.selected = 0,
+                KeyCode::Char('G') | KeyCode::End => {
+                    reader.selected = reader.book.total.saturating_sub(1)
+                }
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                    reader.open_selected();
+                    self.focus = Focus::Main;
+                }
+                _ => {}
+            },
+            KeyCode::Char('j') | KeyCode::Down => reader.scroll(1),
+            KeyCode::Char('k') | KeyCode::Up => reader.scroll(-1),
+            KeyCode::Char(' ') | KeyCode::PageDown => reader.page(true),
+            KeyCode::PageUp => reader.page(false),
+            KeyCode::Char('g') | KeyCode::Home => reader.offset = 0,
+            KeyCode::Char('G') | KeyCode::End => reader.offset = reader.max_offset(),
+            _ => {}
+        }
+    }
+
+    fn goto_id(&mut self, id: &str) {
+        if let Some(i) = self.nav.iter().position(|n| n.id == id) {
+            self.nav_idx = i;
+            self.focus = Focus::Main;
+            self.reset_main_sel();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn goto_id_for_test(&mut self, id: &str) {
+        self.goto_id(id);
+    }
+
+    fn reset_main_sel(&mut self) {
+        self.shelf_group = 0;
+        self.shelf_sel = 0;
+        self.discover_cat = 0;
+        self.discover_sel = 0;
+        self.search_sel = 0;
+    }
+
+    // ── 派生数据 ────────────────────────────────────────────
+    pub fn shelf_base(&self, filter: ShelfFilter) -> Vec<&Book> {
+        self.books
             .iter()
-            .position(|item| item.route == route)
-            .unwrap_or(0);
-        self.notice = Some(format!("当前页面：{}", route.title()));
+            .filter(|b| match filter {
+                ShelfFilter::All => true,
+                ShelfFilter::Local => b.kind == Kind::Local,
+                ShelfFilter::Network => b.kind == Kind::Network,
+            })
+            .collect()
+    }
+
+    pub fn shelf_groups(&self, filter: ShelfFilter) -> Vec<String> {
+        let mut g = vec!["全部".to_string()];
+        for b in self.shelf_base(filter) {
+            if !g.iter().any(|x| x == b.group) {
+                g.push(b.group.to_string());
+            }
+        }
+        g
+    }
+
+    pub fn shelf_list(&self, filter: ShelfFilter) -> Vec<&Book> {
+        let groups = self.shelf_groups(filter);
+        let g = groups
+            .get(self.shelf_group)
+            .map(|s| s.as_str())
+            .unwrap_or("全部");
+        let mut list: Vec<&Book> = self
+            .shelf_base(filter)
+            .into_iter()
+            .filter(|b| g == "全部" || b.group == g)
+            .collect();
+        match self.shelf_sort {
+            1 => list.sort_by(|a, b| a.title.cmp(b.title)),
+            2 => list.sort_by(|a, b| b.new_count.cmp(&a.new_count)),
+            3 => list.sort_by(|a, b| {
+                let pa = a.read as f64 / a.total.max(1) as f64;
+                let pb = b.read as f64 / b.total.max(1) as f64;
+                pb.partial_cmp(&pa).unwrap()
+            }),
+            _ => {}
+        }
+        list
+    }
+
+    pub fn discover_list(&self, source_idx: usize) -> Vec<Book> {
+        let s = match self.sources.get(source_idx) {
+            Some(s) => s,
+            None => return vec![],
+        };
+        let cat = s.categories.get(self.discover_cat).copied().unwrap_or("");
+        let mut books = data::discover_books(s.name, cat);
+        // 把 origin 显示名塞进 intro 前缀，绘制时用 s.name
+        for b in &mut books {
+            b.origin = s.name;
+        }
+        books
+    }
+
+    pub fn search_results(&self) -> Vec<&Book> {
+        let q = self.search_query.trim();
+        if q.is_empty() {
+            return vec![];
+        }
+        self.books
+            .iter()
+            .filter(|b| b.title.contains(q) || b.author.contains(q))
+            .collect()
+    }
+
+    pub fn crumb(&self) -> String {
+        if let Some(reader) = &self.reader {
+            return format!("阅读 › {}", reader.book.title);
+        }
+        let n = &self.nav[self.nav_idx];
+        match n.section {
+            Some(sec) => format!("{sec} › {}", n.label),
+            None => n.label.clone(),
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod reader_tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
 
     #[test]
-    fn sidebar_keyboard_visits_every_entry() {
-        let mut app = App::default();
-        let mut visited = vec![app.selected];
-        for _ in 0..(NAV_ENTRIES.len() - 1) {
-            app.dispatch(Action::Key(KeyCode::Down, KeyModifiers::NONE));
-            visited.push(app.selected);
+    fn shelf_opens_selected_book_and_restores_selection() {
+        let mut app = App::new();
+        app.goto_id("shelf:all");
+        app.shelf_sel = 2;
+        let id = app.shelf_list(ShelfFilter::All)[2].id;
+        app.sidebar_hidden = true;
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.reader.as_ref().unwrap().book.id, id);
+        assert!(!app.sidebar_hidden);
+        key(&mut app, KeyCode::Char(']'));
+        let chapter = app.reader.as_ref().unwrap().chapter;
+        key(&mut app, KeyCode::Esc);
+        assert!(app.reader.is_none());
+        assert!(app.sidebar_hidden);
+        assert_eq!(app.shelf_sel, 2);
+        assert_eq!(app.books.iter().find(|b| b.id == id).unwrap().read, chapter);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn chapters_select_before_open_and_clamp_at_bounds() {
+        let mut app = App::new();
+        app.open_reader(app.books[0].clone());
+        let original = app.reader.as_ref().unwrap().chapter;
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.reader.as_ref().unwrap().chapter, original);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.reader.as_ref().unwrap().chapter, original + 1);
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Char('G'));
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char(']'));
+        assert_eq!(app.reader.as_ref().unwrap().chapter, app.books[0].total - 1);
+        key(&mut app, KeyCode::Char('?'));
+        key(&mut app, KeyCode::Char('q'));
+        assert!(!app.help && app.reader.is_some());
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Char('q'));
+        assert!(app.reader.is_none() && !app.should_quit);
+    }
+
+    #[test]
+    fn home_search_discover_open_preview() {
+        let mut app = App::new();
+        app.focus = Focus::Main;
+        key(&mut app, KeyCode::Char('c'));
+        assert!(app.reader.is_some());
+        key(&mut app, KeyCode::Esc);
+        app.goto_id("discover:search");
+        app.search_query = "三体".into();
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.reader.as_ref().unwrap().book.title, "三体");
+        key(&mut app, KeyCode::Esc);
+        app.goto_id("discover:s1");
+        let expected = app.discover_list(0)[0].title;
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.reader.as_ref().unwrap().book.title, expected);
+    }
+
+    #[test]
+    fn reader_renders_chapters_scrolls_and_handles_resize() {
+        let mut app = App::new();
+        app.open_reader(app.books[0].clone());
+        for (width, height) in [(120, 40), (80, 24), (44, 16), (20, 8), (2, 2), (120, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            if width >= 80 {
+                let buffer = terminal.backend().buffer();
+                let mut text = String::new();
+                for y in 0..height {
+                    let mut x = 0;
+                    while x < width {
+                        let symbol = buffer[(x, y)].symbol();
+                        text.push_str(symbol);
+                        x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+                    }
+                    text.push(' ');
+                }
+                assert!(text.contains("章节目录"));
+                assert!(text.contains("阅读预览"));
+                assert!(!text.contains("全部书籍"));
+                key(&mut app, KeyCode::PageDown);
+                assert!(app.reader.as_ref().unwrap().offset > 0);
+                key(&mut app, KeyCode::Char('G'));
+                let chapter = app.reader.as_ref().unwrap().chapter;
+                key(&mut app, KeyCode::PageDown);
+                let reader = app.reader.as_ref().unwrap();
+                assert_eq!(reader.chapter, chapter + 1);
+                assert_eq!(reader.selected, reader.chapter);
+                assert_eq!(reader.offset, 0);
+            }
         }
-        assert_eq!(visited, (0..NAV_ENTRIES.len()).collect::<Vec<_>>());
     }
 
     #[test]
-    fn mouse_click_selects_exact_sidebar_entry() {
-        let mut app = App::default();
-        let area = Rect::new(0, 0, 24, 20);
-        app.register_hit(Rect::new(1, 8, 22, 1), HitTarget::Sidebar(4));
-        app.dispatch(Action::Mouse(MouseEventKind::Down(MouseButton::Left), 4, 8));
-        assert_eq!(app.selected, 4);
-        assert_eq!(app.route, Route::Search);
-        assert_eq!(app.focus, Focus::Sidebar);
-        let _ = area;
-    }
-
-    #[test]
-    fn mouse_click_selects_main_row_without_opening_it() {
-        let mut app = App::default();
-        app.route = Route::Shelf;
-        app.register_hit(Rect::new(25, 4, 70, 1), HitTarget::MainRow(3));
-        app.dispatch(Action::Mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            30,
-            4,
-        ));
-        assert_eq!(app.main_selected, 3);
-        assert_eq!(app.route, Route::Shelf);
-        app.dispatch(Action::Key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.route, Route::Reader);
+    fn empty_book_does_not_enter_reader() {
+        let mut app = App::new();
+        let mut book = app.books[0].clone();
+        book.total = 0;
+        app.open_reader(book);
+        assert!(app.reader.is_none());
     }
 }

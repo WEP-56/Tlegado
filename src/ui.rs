@@ -1,533 +1,911 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Row, Table};
-use ratatui::Frame;
+//! 布局 · 各视图绘制
+//!
+//! 对照 React 范例：
+//!   顶栏  →  ~/.tlegado › 面包屑          右侧状态
+//!   主体  →  左 Sidebar | 右 Main
+//!   底栏  →  快捷键提示 / toast           [alpha]
 
-use crate::app::{App, Focus, HitTarget, Route, NAV_ENTRIES};
+use crate::app::{App, Focus, Route, ShelfFilter, ToastTone};
+use crate::data::Kind;
+use crate::theme::{
+    self, bar_spans, center_rect, fill_bg, hints, list_scroll, pad, panel, panel_full, row_line, s,
+    sb, sbg, truncate, THEME,
+};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    text::{Line, Span},
+    widgets::{Paragraph, Widget},
+    Frame,
+};
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
-    app.begin_frame();
-    let area = frame.area();
-    let outer = Layout::default()
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    // 整屏铺底，避免默认色漏边
+    fill_bg(area, f.buffer_mut());
+
+    // 状态栏各占一行；只在较高终端保留一行顶部呼吸空间。
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
-            Constraint::Min(0),
-            Constraint::Length(2),
+            Constraint::Length(1),                            // top bar
+            Constraint::Length(u16::from(area.height >= 30)), // gap
+            Constraint::Min(0),                               // body
+            Constraint::Length(1),                            // footer
         ])
+        .split(inset(area, 1, 0));
+
+    draw_topbar(f, app, chunks[0]);
+    draw_body(f, app, chunks[2]);
+    draw_footer(f, app, chunks[3]);
+
+    if app.help {
+        if app.reader.is_some() {
+            draw_reader_help(f, area);
+        } else {
+            draw_help(f, area);
+        }
+    }
+}
+
+fn inset(r: Rect, x: u16, y: u16) -> Rect {
+    Rect {
+        x: r.x + x,
+        y: r.y + y,
+        width: r.width.saturating_sub(x * 2),
+        height: r.height.saturating_sub(y * 2),
+    }
+}
+
+// ── 顶栏 ────────────────────────────────────────────────────
+fn draw_topbar(f: &mut Frame, app: &App, area: Rect) {
+    let focus_label = match app.focus {
+        Focus::Sidebar if app.reader.is_some() => "目录",
+        Focus::Main if app.reader.is_some() => "正文",
+        Focus::Sidebar => "侧栏",
+        Focus::Main => "主体",
+    };
+    let left = Line::from(vec![
+        Span::styled("~/.tlegado ", s(THEME.mute)),
+        Span::styled("› ", s(THEME.dim)),
+        Span::styled(app.crumb(), s(THEME.fg)),
+    ]);
+    let right = if area.width >= 70 {
+        format!("{focus_label} · Tlegado 0.1.0")
+    } else {
+        String::new()
+    };
+    draw_status_line(f, area, left, &right);
+}
+
+// 为右侧标签预留独立区域，长标题和提示只能在左侧截断。
+fn draw_status_line(f: &mut Frame, area: Rect, left: Line<'_>, right: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let rw = unicode_width::UnicodeWidthStr::width(right) as u16;
+    let reserved = if rw > 0 { (rw + 2).min(area.width) } else { 0 };
+    f.render_widget(
+        Paragraph::new(left),
+        Rect::new(area.x, area.y, area.width - reserved, 1),
+    );
+    if rw > 0 && rw < area.width {
+        f.render_widget(
+            Paragraph::new(right).style(s(THEME.dim)),
+            Rect::new(area.right() - rw, area.y, rw, 1),
+        );
+    }
+}
+
+// ── 底栏 ────────────────────────────────────────────────────
+fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let left = if let Some((ref msg, tone, _)) = app.toast {
+        let (icon, color) = match tone {
+            ToastTone::Ok => ("✓", THEME.ok),
+            ToastTone::Err => ("✗", THEME.err),
+            ToastTone::Info => ("●", THEME.info),
+        };
+        Line::from(vec![
+            Span::styled(format!("{icon} "), s(color)),
+            Span::styled(msg.clone(), s(color)),
+        ])
+    } else if area.width < 70 {
+        hints(&[
+            ("tab", "焦点"),
+            ("?", "帮助"),
+            (
+                "q",
+                if app.reader.is_some() {
+                    "返回"
+                } else {
+                    "退出"
+                },
+            ),
+        ])
+    } else if app.reader.is_some() && app.focus == Focus::Sidebar {
+        hints(&[
+            ("tab", "正文"),
+            ("j/k", "选章"),
+            ("enter", "阅读"),
+            ("q", "返回"),
+            ("?", "帮助"),
+        ])
+    } else if app.reader.is_some() {
+        hints(&[
+            ("tab", "目录"),
+            ("j/k", "滚动"),
+            ("space", "翻页"),
+            ("q", "返回"),
+            ("?", "帮助"),
+        ])
+    } else {
+        hints(&[
+            ("tab", "焦点"),
+            ("j/k", "移动"),
+            ("enter", "打开"),
+            ("/", "搜索"),
+            ("?", "帮助"),
+            ("q", "退出"),
+        ])
+    };
+    let right = if left.width() + 9 <= area.width as usize {
+        "[alpha]"
+    } else {
+        ""
+    };
+    draw_status_line(f, area, left, right);
+}
+
+// ── 主体：侧栏 + 主区 ───────────────────────────────────────
+fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.sidebar_hidden {
+        draw_main(f, app, area);
+        return;
+    }
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(28), Constraint::Min(0)])
+        .split(area);
+    draw_sidebar(f, app, cols[0]);
+    draw_main(f, app, cols[1]);
+}
+
+// ── 侧栏 ────────────────────────────────────────────────────
+fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
+    if let Some(reader) = &app.reader {
+        crate::reader::draw_chapters(f, reader, area, app.focus == Focus::Sidebar);
+        return;
+    }
+    let focused = app.focus == Focus::Sidebar;
+    let title = vec![
+        Span::styled(
+            "● ",
+            if focused {
+                sb(THEME.accent)
+            } else {
+                s(THEME.mute)
+            },
+        ),
+        Span::styled("Tlegado", sb(THEME.hi)),
+    ];
+    let block = panel(title, Some(Span::styled("tab ⇄", s(THEME.dim))), focused);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let vis = app.visible_nav();
+    let h = inner.height as usize;
+
+    let mut last_section: Option<&str> = Some("__");
+    // 按 visible 顺序生成行；section header 插在该 section 第一项前面
+    let mut rows: Vec<SideRow> = Vec::new();
+    for &i in &vis {
+        let n = &app.nav[i];
+        if n.section != last_section {
+            if let Some(sec) = n.section {
+                let collapsed = app.collapsed.get(sec).copied().unwrap_or(false);
+                rows.push(SideRow::Header {
+                    name: sec,
+                    collapsed,
+                });
+            }
+            last_section = n.section;
+        }
+        rows.push(SideRow::Item { idx: i });
+    }
+
+    let sel_row = rows
+        .iter()
+        .position(|r| matches!(r, SideRow::Item { idx } if *idx == app.nav_idx))
+        .unwrap_or(0);
+    let scroll = list_scroll(sel_row, h, rows.len());
+
+    for (y, row) in rows.iter().skip(scroll).enumerate() {
+        if y as u16 >= inner.height {
+            break;
+        }
+        let row_area = Rect {
+            x: inner.x,
+            y: inner.y + y as u16,
+            width: inner.width,
+            height: 1,
+        };
+        match row {
+            SideRow::Header { name, collapsed } => {
+                let arrow = if *collapsed { "▸" } else { "▾" };
+                let line = Line::from(vec![
+                    Span::styled(format!(" {arrow} "), s(THEME.dim)),
+                    Span::styled(*name, s(THEME.dim)),
+                    Span::styled(" ", s(THEME.dim)),
+                    Span::styled("─".repeat(20), s(THEME.border)),
+                ]);
+                f.render_widget(Paragraph::new(line), row_area);
+            }
+            SideRow::Item { idx } => {
+                let n = &app.nav[*idx];
+                let sel = *idx == app.nav_idx;
+                let indent = if n.section.is_some() { "  " } else { "" };
+                let mut content = vec![
+                    Span::raw(indent),
+                    Span::styled(
+                        pad(&n.label, 12),
+                        if sel { sb(THEME.hi) } else { s(THEME.fg) },
+                    ),
+                ];
+                if !n.right.is_empty() {
+                    // caret(2) + indent + label(12) + right；剩余空间用空格填
+                    let used = 2
+                        + indent.len()
+                        + 12
+                        + unicode_width::UnicodeWidthStr::width(n.right.as_str());
+                    let gap = (inner.width as usize).saturating_sub(used + 1);
+                    content.push(Span::raw(" ".repeat(gap)));
+                    content.push(Span::styled(n.right.clone(), s(THEME.dim)));
+                }
+                let line = row_line(sel, focused, content);
+                f.render_widget(Paragraph::new(line), row_area);
+            }
+        }
+    }
+}
+
+enum SideRow {
+    Header { name: &'static str, collapsed: bool },
+    Item { idx: usize },
+}
+
+// ── 主区路由 ────────────────────────────────────────────────
+fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
+    let body = area;
+
+    if let Some(reader) = &mut app.reader {
+        crate::reader::draw_page(f, reader, body, app.focus == Focus::Main);
+        return;
+    }
+    match app.route().clone() {
+        Route::Home => draw_home(f, app, body),
+        Route::Shelf { filter } => draw_shelf(f, app, body, filter),
+        Route::Discover { source_idx } => draw_discover(f, app, body, source_idx),
+        Route::Search => draw_search(f, app, body),
+        Route::History | Route::Sources | Route::Purify | Route::Prefs => {
+            crate::demo::draw(f, app, body)
+        }
+    }
+}
+
+// ── 首页 ────────────────────────────────────────────────────
+fn draw_home(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == Focus::Main;
+    let block = panel(
+        vec![
+            Span::styled("Tlegado ", sb(THEME.hi)),
+            Span::styled("0.1.0-alpha", s(THEME.dim)),
+        ],
+        None,
+        focused,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let enabled = app.sources.iter().filter(|s| s.enabled).count();
+    let updates: u32 = app.books.iter().map(|b| b.new_count).sum();
+
+    let logo = [
+        r"   .·''''''·. .·''''''·.",
+        r"  :  ·····   :   ·····  :",
+        r"  :  ····    :   ·····  :",
+        r"  :  ·····   :   ···    :",
+        r"  :  ···     :   ·····  :",
+        r"  :  ·····   :   ····   :",
+        r"  '·.......·' '·.......·'",
+        r"         '·.___.·'",
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    // logo + 说明并排有点难，这里简单上下排
+    for l in &logo {
+        lines.push(Line::from(Span::styled(*l, s(THEME.mute))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "基于 legado（阅读 3.0）书源规则的终端阅读器。书源 ",
+            s(THEME.mute),
+        ),
+        Span::styled(format!("{enabled}/{}", app.sources.len()), s(THEME.fg)),
+        Span::styled(" 可用，书架 ", s(THEME.mute)),
+        Span::styled(format!("{updates}"), s(THEME.accent)),
+        Span::styled(" 章更新待读。", s(THEME.mute)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            app.books
+                .first()
+                .map(|book| format!("[继续阅读 {} · 第{}章]", book.title, book.read + 1))
+                .unwrap_or_else(|| "[书架暂无书籍]".into()),
+            s(THEME.accent),
+        ),
+        Span::styled("  or press c", s(THEME.dim)),
+    ]));
+    lines.push(Line::from(""));
+
+    let menu = [
+        ("打开书架", "b"),
+        ("发现 · 按书源浏览", "e"),
+        ("搜索书籍", "/"),
+        ("导入本地书籍", "o"),
+        ("书源管理", "s"),
+        ("快捷键帮助", "?"),
+    ];
+    for (label, key) in &menu {
+        lines.push(Line::from(vec![
+            Span::styled("  ", s(THEME.fg)),
+            Span::styled(pad(label, 22), sb(THEME.fg)),
+            Span::styled(*key, s(THEME.mute)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("今日阅读  ", s(THEME.dim)),
+        Span::styled("2小时05分", s(THEME.hi)),
+        Span::styled("    本周章节  ", s(THEME.dim)),
+        Span::styled("146 章", s(THEME.hi)),
+        Span::styled("    缓存  ", s(THEME.dim)),
+        Span::styled("38.2 MB", s(THEME.hi)),
+    ]));
+
+    f.render_widget(
+        Paragraph::new(lines).style(sbg(THEME.fg, THEME.bg)),
+        inset(inner, 2, 1),
+    );
+}
+
+// ── 书架 ────────────────────────────────────────────────────
+fn draw_shelf(f: &mut Frame, app: &App, area: Rect, filter: ShelfFilter) {
+    let focused = app.focus == Focus::Main;
+    let list = app.shelf_list(filter);
+    let groups = app.shelf_groups(filter);
+    let title_name = match filter {
+        ShelfFilter::All => "全部书籍",
+        ShelfFilter::Local => "本地图书",
+        ShelfFilter::Network => "网络图书",
+    };
+
+    // 左列表 + 右详情
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(40), Constraint::Length(36)])
         .split(area);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("~/.tlegado", Style::default().fg(Color::DarkGray)),
-            Span::raw("  ›  "),
-            Span::styled(
-                app.route.title(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        outer[0],
-    );
-
-    if app.sidebar_visible {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(24), Constraint::Min(0)])
-            .split(outer[1]);
-        app.set_sidebar_area(chunks[0]);
-        draw_sidebar(frame, app, chunks[0]);
-        draw_main(frame, app, chunks[1]);
-    } else {
-        draw_main(frame, app, outer[1]);
-    }
-
-    let status = app
-        .notice
-        .as_deref()
-        .unwrap_or("tab 切换焦点 · j/k 移动 · ? 帮助 · q 退出");
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(status, Style::default().fg(Color::Gray)),
-            Span::raw("  "),
-            Span::styled("[alpha]", Style::default().fg(Color::DarkGray)),
-        ])),
-        outer[2],
-    );
-
-    if app.help_visible {
-        draw_help(frame, area);
-    }
-}
-
-fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let items = vec![
-        nav_item(app, 0, "首页", ""),
-        section_item("▾ 书架"),
-        nav_item(app, 1, "全部书籍", "10"),
-        nav_item(app, 2, "本地书库", "4"),
-        nav_item(app, 3, "网络书库", "+31"),
-        section_item("▾ 发现"),
-        nav_item(app, 4, "搜索书籍", "/"),
-        nav_item(app, 5, "起点中文网", "7类"),
-        nav_item(app, 6, "番茄小说", "5类"),
-        nav_item(app, 7, "笔趣阁①", "6类"),
-        section_item("▾ 设置"),
-        nav_item(app, 8, "阅读历史", "8"),
-        nav_item(app, 9, "书源管理", "6/8"),
-        nav_item(app, 10, "阅读偏好", ""),
-    ];
-    for (row, _) in NAV_ENTRIES.iter().enumerate() {
-        let offset = match row {
-            0 => 0,
-            1..=3 => 1,
-            4..=7 => 2,
-            _ => 3,
-        };
-        app.register_hit(
-            Rect::new(
-                area.x + 1,
-                area.y + 1 + (row + offset) as u16,
-                area.width.saturating_sub(2),
-                1,
-            ),
-            HitTarget::Sidebar(row),
-        );
-    }
-    let border = if app.focus == Focus::Sidebar {
-        Color::Rgb(227, 163, 90)
-    } else {
-        Color::DarkGray
-    };
-    frame.render_widget(
-        List::new(items).block(
-            Block::bordered()
-                .title(" Tlegado ")
-                .border_style(Style::default().fg(border)),
-        ),
-        area,
-    );
-}
-
-fn nav_item(app: &App, index: usize, label: &str, count: &str) -> ListItem<'static> {
-    let selected = index == app.selected;
-    let marker = if selected { "› " } else { "  " };
-    let style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    ListItem::new(Line::from(vec![
-        Span::styled(format!("{marker}{label}"), style),
-        Span::styled(format!("{count:>5}"), Style::default().fg(Color::DarkGray)),
-    ]))
-}
-
-fn section_item(label: &str) -> ListItem<'static> {
-    ListItem::new(Line::from(Span::styled(
-        label.to_string(),
-        Style::default().fg(Color::DarkGray),
-    )))
-}
-
-fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::bordered()
-        .title(format!(" {} ", app.route.title()))
-        .border_style(Style::default().fg(if app.focus == Focus::Main {
-            Color::Rgb(227, 163, 90)
-        } else {
-            Color::DarkGray
-        }));
-    match app.route {
-        Route::Home => draw_home(frame, app, area, block),
-        Route::Shelf => draw_shelf(frame, app, area, block),
-        Route::Search => draw_search(frame, app, area, block),
-        Route::History => draw_table_page(
-            frame,
-            app,
-            area,
-            block,
-            "阅读历史",
-            &["诡秘之主", "道诡异仙", "大奉打更人"],
-        ),
-        Route::Sources => draw_sources(frame, app, area, block),
-        Route::Preferences => draw_preferences(frame, app, area, block),
-        Route::Reader => draw_reader(frame, app, area, block),
-    }
-}
-
-fn draw_reader(frame: &mut Frame, app: &App, area: Rect, block: Block<'static>) {
-    let inner = block.inner(area);
-    frame.render_widget(block.title(" 诡秘之主  ·  爱潜水的乌贼 "), area);
-    let paragraphs = [
-        "第813章 雾中来客",
-        "",
-        "他忽然明白，自己并不是偶然走到这里的。每一次犹豫，每一次转身，都早已写在那本书的某一页上。",
-        "",
-        "他站在书店门口，指尖还残留着纸页的触感。那本没有署名的旧书，此刻正安静地躺在他的外套口袋里。",
-        "",
-        "他想起多年前那个下午，老人坐在藤椅上对他说过的话：真正的故事，从来不是写给所有人看的。",
-        "",
-        "他忽然明白，自己并不是偶然走到这里的。每一次犹豫，每一次转身，都早已写在那本书的某一页上。",
-    ];
-    let mut lines = Vec::new();
-    for (i, paragraph) in paragraphs.iter().enumerate() {
-        let style = if i == 0 {
-            Style::default()
-                .fg(Color::Rgb(227, 163, 90))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        lines.push(Line::from(Span::styled(*paragraph, style)));
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 2))),
-        inner,
-    );
-    let footer = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 2);
-    let progress = format!(
-        "第813章  雾中来客                                      1/2 页   ━━━━━  56.7%   12:52"
-    );
-    frame.render_widget(
-        Paragraph::new(progress).style(Style::default().fg(Color::DarkGray)),
-        footer,
-    );
-    let _ = app;
-}
-
-fn draw_home(frame: &mut Frame, app: &App, area: Rect, block: Block<'static>) {
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "Tlegado",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  0.1.0-alpha", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(""),
-        Line::from(
-            "基于 legado（阅读 3.0）书源规则的终端阅读器。书源 6/8 可用，书架 31 章更新待读。",
-        ),
-        Line::from(vec![
-            Span::styled(
-                "[继续阅读 诡秘之主 · 第813章 雾中来客]",
-                Style::default().fg(Color::Rgb(227, 163, 90)),
-            ),
-            Span::styled("  or press c", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "› 打开书架                                      b",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+    // ── 左：列表面板
+    let block = panel_full(
+        vec![
+            Span::styled("书架", sb(THEME.hi)),
+            Span::styled(format!(" / {title_name}"), s(THEME.dim)),
+        ],
+        Some(Span::styled(format!("{} 本", list.len()), s(THEME.dim))),
+        Some(Span::styled(
+            "enter 阅读  h/l 分组  s 排序  r 更新  x 移出",
+            s(THEME.dim),
         )),
-        Line::from("  发现 · 按书源浏览                              e"),
-        Line::from("  搜索书籍                                      /"),
-        Line::from("  导入本地书籍                                    o"),
-        Line::from("  书源管理                                      s"),
-        Line::from("  快捷键帮助                                    ?"),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().padding(ratatui::widgets::Padding::new(4, 2, 1, 2))),
-        inner,
+        focused,
     );
-    let stats = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 3); 3])
-        .split(Rect::new(inner.x, inner.y + 15, inner.width, 4));
-    for (rect, (label, value)) in stats.iter().zip([
-        ("今日阅读", "2小时05分"),
-        ("本周章节", "146 章"),
-        ("缓存占用", "38.2 MB"),
-    ]) {
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(label, Style::default().fg(Color::DarkGray))),
-                Line::from(Span::styled(
-                    value,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-            ]),
-            *rect,
-        );
-    }
-    let _ = app;
-}
+    let inner = block.inner(cols[0]);
+    f.render_widget(block, cols[0]);
 
-fn draw_shelf(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'static>) {
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let header = Row::new(["书名", "作者", "进度", "最新章节", "来源"])
-        .style(Style::default().fg(Color::DarkGray))
-        .bottom_margin(1);
-    let books = [
-        (
-            "诡秘之主",
-            "爱潜水的乌贼",
-            "57%",
-            "第1432章 新的征程",
-            "起点中文网",
-        ),
-        (
-            "道诡异仙 +6",
-            "狐尾的笔",
-            "100%",
-            "第1068章 心素",
-            "起点中文网",
-        ),
-        (
-            "大奉打更人",
-            "卖报小郎君",
-            "28%",
-            "第1284章 大结局",
-            "番茄小说",
-        ),
-        (
-            "深空彼岸 +22",
-            "辰东",
-            "99%",
-            "第1520章 彼岸花开",
-            "笔趣阁①",
-        ),
-        (
-            "凡人修仙传",
-            "忘语",
-            "100%",
-            "第2446章 飞升仙界",
-            "纵横中文网",
-        ),
-        (
-            "我在精神病院学斩神 +3",
-            "三九音域",
-            "67%",
-            "第1356章 天庭",
-            "番茄小说",
-        ),
-        ("三体", "刘慈欣", "37%", "第104章 尾声", "本地·EPUB"),
-        ("活着", "余华", "100%", "第12章 老人与牛", "本地·TXT"),
-    ];
-    for (index, _) in books.iter().enumerate() {
-        app.register_hit(
-            Rect::new(inner.x, inner.y + 2 + index as u16, inner.width, 1),
-            HitTarget::MainRow(index),
-        );
-    }
-    let rows = books.iter().enumerate().map(|(i, b)| {
-        Row::new([b.0, b.1, b.2, b.3, b.4]).style(if i == app.main_selected % books.len() {
-            Style::default().bg(Color::Rgb(38, 38, 38)).fg(Color::White)
+    // 分组 tabs
+    let mut tab_spans: Vec<Span> = Vec::new();
+    for (i, g) in groups.iter().enumerate() {
+        if i == app.shelf_group {
+            tab_spans.push(Span::styled(
+                format!("[{g}]"),
+                if focused {
+                    s(THEME.accent)
+                } else {
+                    s(THEME.hi)
+                },
+            ));
         } else {
-            Style::default().fg(Color::Gray)
-        })
+            tab_spans.push(Span::styled(format!(" {g} "), s(THEME.dim)));
+        }
+    }
+    let sort_names = ["最近阅读", "书名", "更新数", "进度"];
+    let tabs_line = Line::from({
+        let mut spans = tab_spans;
+        spans.push(Span::styled(
+            format!("    排序: {} ↓", sort_names[app.shelf_sort]),
+            s(THEME.dim),
+        ));
+        spans
     });
-    frame.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Length(25),
-                Constraint::Length(17),
-                Constraint::Length(10),
-                Constraint::Length(27),
-                Constraint::Min(15),
-            ],
-        )
-        .header(header)
-        .column_spacing(1),
-        inner,
-    );
-}
 
-fn draw_search(frame: &mut Frame, _app: &App, area: Rect, block: Block<'static>) {
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "› 剑来",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "                                      enter 搜索",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "● SearchBook(key=\"剑来\", sources=6)",
-            Style::default().fg(Color::Gray),
-        )),
-        Line::from("  ├ 起点中文网       ✓ 1 条 212ms"),
-        Line::from("  ├ 番茄小说         ✓ 1 条 188ms"),
-        Line::from("  ├ 笔趣阁①         ✓ 1 条 540ms"),
-        Line::from("  ├ 纵横中文网       ✓ 无结果 301ms"),
-        Line::from(""),
-        Line::from("› 剑来             烽火戏诸侯       起点中文网"),
-        Line::from("  剑来             烽火戏诸侯       番茄小说"),
-        Line::from("  剑来             烽火戏诸侯       笔趣阁①"),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().padding(ratatui::widgets::Padding::new(2, 1, 1, 1))),
-        inner,
-    );
-}
+    // 表头
+    let header = Line::from(vec![
+        Span::styled("  ", s(THEME.dim)),
+        Span::styled(pad("书名", 14), s(THEME.dim)),
+        Span::styled(pad("作者", 10), s(THEME.dim)),
+        Span::styled(pad("进度", 14), s(THEME.dim)),
+        Span::styled("来源", s(THEME.dim)),
+    ]);
 
-fn draw_table_page(
-    frame: &mut Frame,
-    app: &App,
-    area: Rect,
-    block: Block<'static>,
-    title: &str,
-    values: &[&str],
-) {
-    let inner = block.inner(area);
-    frame.render_widget(block.title(format!(" {title} / 最近阅读 ")), area);
-    let rows = values.iter().enumerate().map(|(i, v)| {
-        Row::new([*v, "作者", "第 812 章", "10分钟前"]).style(
-            if i == app.main_selected % values.len() {
-                Style::default().bg(Color::Rgb(38, 38, 38)).fg(Color::White)
+    let body_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // tabs
+            Constraint::Length(1), // header
+            Constraint::Min(0),    // list
+        ])
+        .split(inner);
+
+    f.render_widget(Paragraph::new(tabs_line), body_chunks[0]);
+    f.render_widget(Paragraph::new(header), body_chunks[1]);
+
+    let list_area = body_chunks[2];
+    let h = list_area.height as usize;
+    let scroll = list_scroll(app.shelf_sel, h, list.len());
+
+    for (i, b) in list.iter().enumerate().skip(scroll) {
+        let y = (i - scroll) as u16;
+        if y >= list_area.height {
+            break;
+        }
+        let sel = i == app.shelf_sel;
+        let progress = (b.read as f64 + if b.read > 0 { 1.0 } else { 0.0 }) / b.total.max(1) as f64;
+        let pct = (progress * 100.0).round() as u32;
+
+        let mut title = b.title.to_string();
+        if b.new_count > 0 {
+            title = format!("{} +{}", b.title, b.new_count);
+        }
+        let origin = match b.kind {
+            Kind::Local => format!("本地"),
+            Kind::Network => b.origin.to_string(),
+        };
+
+        let mut content = vec![
+            Span::styled(
+                pad(&title, 14),
+                if sel { sb(THEME.hi) } else { s(THEME.fg) },
+            ),
+            Span::styled(pad(b.author, 10), s(THEME.mute)),
+        ];
+        content.extend(bar_spans(progress, 8));
+        content.push(Span::styled(format!(" {pct}% "), s(THEME.dim)));
+        content.push(Span::styled(
+            origin,
+            if b.kind == Kind::Local {
+                s(THEME.info)
             } else {
-                Style::default().fg(Color::Gray)
+                s(THEME.dim)
             },
-        )
-    });
-    frame.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Length(24),
-                Constraint::Length(18),
-                Constraint::Length(16),
-                Constraint::Min(12),
-            ],
-        )
-        .header(
-            Row::new(["书名", "作者", "章节", "时间"]).style(Style::default().fg(Color::DarkGray)),
-        ),
-        inner,
-    );
+        ));
+
+        let line = row_line(sel, focused, content);
+        f.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: list_area.x,
+                y: list_area.y + y,
+                width: list_area.width,
+                height: 1,
+            },
+        );
+    }
+
+    // ── 右：详情
+    if let Some(b) = list.get(app.shelf_sel) {
+        draw_book_detail(f, b, cols[1], false);
+    }
 }
 
-fn draw_sources(frame: &mut Frame, app: &App, area: Rect, block: Block<'static>) {
+fn draw_book_detail(f: &mut Frame, b: &crate::data::Book, area: Rect, focused: bool) {
+    let block = panel(vec![Span::styled("详情", s(THEME.mute))], None, focused);
     let inner = block.inner(area);
-    frame.render_widget(block.title(" 书源管理 / 6/8 可用 "), area);
-    let rows = [
-        ("[✓]", "起点中文网", "正版", "212ms", "✓"),
-        ("[✓]", "番茄小说", "正版", "188ms", "✓"),
-        ("[✓]", "笔趣阁①", "聚合", "540ms", "✓"),
-        ("[✓]", "纵横中文网", "正版", "301ms", "✓"),
-        ("[ ]", "69书吧", "聚合", "690ms", "✓"),
-        ("[ ]", "书海阁", "聚合", "超时", "-"),
-    ];
-    let items = rows.iter().enumerate().map(|(i, r)| {
-        Row::new([r.0, r.1, r.2, r.3, r.4]).style(if i == app.main_selected % rows.len() {
-            Style::default().bg(Color::Rgb(38, 38, 38)).fg(Color::White)
-        } else {
-            Style::default().fg(Color::Gray)
-        })
-    });
-    frame.render_widget(
-        Table::new(
-            items,
-            [
-                Constraint::Length(6),
-                Constraint::Length(20),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Min(8),
-            ],
-        )
-        .header(
-            Row::new(["启用", "书源名", "分组", "响应", "发现"])
-                .style(Style::default().fg(Color::DarkGray)),
-        ),
-        inner,
-    );
-}
+    f.render_widget(block, area);
 
-fn draw_preferences(frame: &mut Frame, app: &App, area: Rect, block: Block<'static>) {
-    let inner = block.inner(area);
-    frame.render_widget(
-        block.title(" 阅读偏好 / ~/.config/tlegado/config.toml "),
-        area,
-    );
-    let rows = [
-        ("配色主题", "<终端默认>  护眼绿  羊皮纸  高对比"),
-        ("行宽", "<自适应> 28 36 44"),
-        ("行距", "<1.0> 1.5 2.0"),
-        ("段首缩进", "<0> 2"),
-        ("分页方式", "<整页> 滚动"),
-        ("自动翻页", "<关> 5s 10s 20s"),
-        ("底部进度条", "<开> 关"),
-        ("启用净化规则", "<开> 关"),
-        ("简繁转换", "<关闭> 简→繁 繁→简"),
-    ];
-    let items = rows.iter().enumerate().map(|(i, r)| {
-        Row::new([r.0, r.1, ""]).style(if i == app.main_selected % rows.len() {
-            Style::default().bg(Color::Rgb(38, 38, 38)).fg(Color::White)
-        } else {
-            Style::default().fg(Color::Gray)
-        })
-    });
-    frame.render_widget(
-        Table::new(
-            items,
-            [
-                Constraint::Length(18),
-                Constraint::Length(35),
-                Constraint::Min(10),
-            ],
-        )
-        .header(Row::new(["", "", ""]).style(Style::default().fg(Color::DarkGray))),
-        inner,
-    );
-}
+    let progress = (b.read as f64 + if b.read > 0 { 1.0 } else { 0.0 }) / b.total.max(1) as f64;
 
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let width = area.width.min(58);
-    let height = 13.min(area.height.saturating_sub(2));
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    let popup = Rect::new(x, y, width, height);
-    frame.render_widget(Clear, popup);
-    let lines = vec![
-        Line::from(Span::styled(
-            "快捷键",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("Tab       切换侧栏 / 主体焦点"),
-        Line::from("j / k     移动选中项"),
-        Line::from("Enter     打开当前项"),
-        Line::from("/         打开搜索"),
-        Line::from("Ctrl+B    显示 / 隐藏侧栏"),
-        Line::from("Esc / q   退出或关闭弹层"),
-        Line::from("?         关闭帮助"),
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(b.title, sb(THEME.hi))),
+        Line::from(Span::styled(b.author, s(THEME.mute))),
+        Line::from(vec![
+            Span::styled(format!("#{} ", b.category), s(THEME.info)),
+            Span::styled(
+                format!("#{} ", b.status),
+                if b.status == "完结" {
+                    s(THEME.ok)
+                } else {
+                    s(THEME.accent)
+                },
+            ),
+            Span::styled(format!("#{}字", b.words), s(THEME.dim)),
+        ]),
         Line::from(""),
-        Line::from("鼠标：点击侧栏项目，滚轮查看状态"),
+        kv("来源", b.origin),
+        kv("章节", &format!("{} 章", b.total)),
+        kv("最新", b.latest),
+        kv("上次", b.last_read),
+        Line::from(""),
+        Line::from({
+            let mut spans = bar_spans(progress, 18);
+            spans.push(Span::styled(
+                format!(" {:.1}%", progress * 100.0),
+                theme::s(THEME.dim),
+            ));
+            spans
+        }),
+        Line::from(""),
+        Line::from(Span::styled("简介", s(THEME.dim))),
+        Line::from(Span::styled(
+            truncate(b.intro, (inner.width as usize).saturating_sub(2)),
+            s(THEME.fg),
+        )),
     ];
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::bordered()
-                .title(" 帮助 ")
-                .border_style(Style::default().fg(Color::Cyan)),
+    // 简单 wrap intro
+    f.render_widget(
+        Paragraph::new(lines).style(sbg(THEME.fg, THEME.bg)),
+        inset(inner, 1, 1),
+    );
+}
+
+fn kv(k: &str, v: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{k:4}"), s(THEME.dim)),
+        Span::styled(v.to_string(), s(THEME.fg)),
+    ])
+}
+
+// ── 发现 ────────────────────────────────────────────────────
+fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
+    let focused = app.focus == Focus::Main;
+    let source = match app.sources.get(source_idx) {
+        Some(s) => s,
+        None => return,
+    };
+    let list = app.discover_list(source_idx);
+    let cats = source.categories;
+
+    let lat = if source.respond_ms < 0 {
+        "超时".to_string()
+    } else {
+        format!("{}ms", source.respond_ms)
+    };
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(40), Constraint::Length(36)])
+        .split(area);
+
+    let block = panel_full(
+        vec![
+            Span::styled("发现", sb(THEME.hi)),
+            Span::styled(format!(" / {}", source.name), s(THEME.dim)),
+        ],
+        Some(Span::styled(
+            format!("{} · {lat}", source.url),
+            s(THEME.dim),
+        )),
+        Some(Span::styled(
+            "enter 试读  a 加入书架  h/l 分类  j/k 移动",
+            s(THEME.dim),
+        )),
+        focused,
+    );
+    let inner = block.inner(cols[0]);
+    f.render_widget(block, cols[0]);
+
+    // tabs
+    let mut tab_spans = Vec::new();
+    for (i, c) in cats.iter().enumerate() {
+        if i == app.discover_cat {
+            tab_spans.push(Span::styled(
+                format!("[{c}]"),
+                if focused {
+                    s(THEME.accent)
+                } else {
+                    s(THEME.hi)
+                },
+            ));
+        } else {
+            tab_spans.push(Span::styled(format!(" {c} "), s(THEME.dim)));
+        }
+    }
+    let header = Line::from(vec![
+        Span::styled("  ", s(THEME.dim)),
+        Span::styled(pad("书名", 14), s(THEME.dim)),
+        Span::styled(pad("作者", 10), s(THEME.dim)),
+        Span::styled(pad("分类", 6), s(THEME.dim)),
+        Span::styled("状态", s(THEME.dim)),
+    ]);
+
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+    f.render_widget(Paragraph::new(Line::from(tab_spans)), body[0]);
+    f.render_widget(Paragraph::new(header), body[1]);
+
+    let list_area = body[2];
+    let h = list_area.height as usize;
+    let scroll = list_scroll(app.discover_sel, h, list.len());
+    for (i, b) in list.iter().enumerate().skip(scroll) {
+        let y = (i - scroll) as u16;
+        if y >= list_area.height {
+            break;
+        }
+        let sel = i == app.discover_sel;
+        let content = vec![
+            Span::styled(
+                pad(b.title, 14),
+                if sel { sb(THEME.hi) } else { s(THEME.fg) },
+            ),
+            Span::styled(pad(b.author, 10), s(THEME.mute)),
+            Span::styled(pad(b.category, 6), s(THEME.info)),
+            Span::styled(
+                b.status,
+                if b.status == "完结" {
+                    s(THEME.ok)
+                } else {
+                    s(THEME.accent)
+                },
+            ),
+        ];
+        let line = row_line(sel, focused, content);
+        f.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: list_area.x,
+                y: list_area.y + y,
+                width: list_area.width,
+                height: 1,
+            },
+        );
+    }
+
+    if let Some(b) = list.get(app.discover_sel) {
+        draw_book_detail(f, b, cols[1], false);
+    }
+}
+
+// ── 搜索 ────────────────────────────────────────────────────
+fn draw_search(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == Focus::Main;
+    let results = app.search_results();
+
+    let block = panel_full(
+        vec![
+            Span::styled("发现", sb(THEME.hi)),
+            Span::styled(" / 搜索", s(THEME.dim)),
+        ],
+        Some(Span::styled(
+            if app.search_query.is_empty() {
+                format!(
+                    "{} 个书源",
+                    app.sources.iter().filter(|s| s.enabled).count()
+                )
+            } else {
+                format!("{} 条结果", results.len())
+            },
+            s(THEME.dim),
+        )),
+        Some(Span::styled(
+            "enter 试读  a 加入  i 输入  j/k 移动",
+            s(THEME.dim),
+        )),
+        focused,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // input
+            Constraint::Length(1), // sep
+            Constraint::Min(0),    // results
+        ])
+        .split(inner);
+
+    // 输入行
+    let cursor = if app.search_input_mode { "▋" } else { " " };
+    let input_line = Line::from(vec![
+        Span::styled(
+            "❯ ",
+            if app.search_input_mode {
+                s(THEME.hi)
+            } else {
+                s(THEME.mute)
+            },
         ),
-        popup,
+        Span::styled(app.search_query.clone(), s(THEME.hi)),
+        Span::styled(cursor, s(THEME.accent)),
+        if app.search_query.is_empty() && !app.search_input_mode {
+            Span::styled(" 输入书名或作者，按 i 开始输入", s(THEME.dim))
+        } else {
+            Span::raw("")
+        },
+    ]);
+    f.render_widget(Paragraph::new(input_line), body[0]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(body[1].width as usize),
+            s(THEME.border),
+        ))),
+        body[1],
+    );
+
+    let list_area = body[2];
+    if app.search_query.trim().is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  输入关键词后按 Enter。试试「诡秘」「三体」「远瞳」。",
+                s(THEME.dim),
+            ))),
+            list_area,
+        );
+        return;
+    }
+    if results.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("  没有找到「{}」相关书籍。", app.search_query.trim()),
+                s(THEME.dim),
+            ))),
+            list_area,
+        );
+        return;
+    }
+
+    let h = list_area.height as usize;
+    let scroll = list_scroll(app.search_sel, h, results.len());
+    for (i, b) in results.iter().enumerate().skip(scroll) {
+        let y = (i - scroll) as u16;
+        if y >= list_area.height {
+            break;
+        }
+        let sel = i == app.search_sel;
+        let content = vec![
+            Span::styled(
+                pad(b.title, 16),
+                if sel { sb(THEME.hi) } else { s(THEME.fg) },
+            ),
+            Span::styled(pad(b.author, 12), s(THEME.mute)),
+            Span::styled(
+                if b.kind == Kind::Local {
+                    "本地"
+                } else {
+                    b.origin
+                },
+                s(THEME.info),
+            ),
+        ];
+        let line = row_line(sel, focused && !app.search_input_mode, content);
+        f.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: list_area.x,
+                y: list_area.y + y,
+                width: list_area.width,
+                height: 1,
+            },
+        );
+    }
+}
+
+// ── 帮助浮层 ────────────────────────────────────────────────
+fn draw_help(f: &mut Frame, area: Rect) {
+    let r = center_rect(area, 72, 22);
+    // 清出一块 + 铺底
+    ratatui::widgets::Clear.render(r, f.buffer_mut());
+    fill_bg(r, f.buffer_mut());
+
+    let block = panel(
+        vec![Span::styled("快捷键", sb(THEME.hi))],
+        Some(Span::styled("esc / ? 关闭", s(THEME.dim))),
+        true,
+    );
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    let groups: &[(&str, &[(&str, &str)])] = &[
+        (
+            "全局",
+            &[
+                ("tab", "侧栏 ⇄ 主体"),
+                ("/", "搜索"),
+                ("?", "帮助"),
+                ("ctrl+b", "显隐侧栏"),
+                ("q", "退出"),
+            ],
+        ),
+        (
+            "列表",
+            &[
+                ("j k", "上下移动"),
+                ("h l", "切换分组/分类"),
+                ("g G", "首/尾"),
+                ("enter", "打开"),
+                ("space", "折叠 section"),
+            ],
+        ),
+        (
+            "书架",
+            &[("s", "切换排序"), ("r", "检查更新"), ("x", "移出书架")],
+        ),
+        (
+            "发现/搜索",
+            &[("a", "加入书架"), ("i", "聚焦输入"), ("h l", "切换分类")],
+        ),
+    ];
+
+    let mut lines = Vec::new();
+    for (g, items) in groups {
+        lines.push(Line::from(Span::styled(format!("── {g}"), s(THEME.dim))));
+        for (k, d) in *items {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {d:12}"), s(THEME.fg)),
+                Span::styled((*k).to_string(), s(THEME.accent)),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    f.render_widget(Paragraph::new(lines), inset(inner, 2, 1));
+}
+
+fn draw_reader_help(f: &mut Frame, area: Rect) {
+    let r = center_rect(area, 68, 19);
+    ratatui::widgets::Clear.render(r, f.buffer_mut());
+    let block = panel(
+        vec![Span::styled("阅读快捷键", sb(THEME.hi))],
+        Some(Span::styled("esc / ? 关闭", s(THEME.dim))),
+        true,
+    );
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let lines = [
+        "Tab       章节目录 ⇄ 正文",
+        "目录 j/k  上下选择；Enter 打开章节",
+        "正文 j/k  逐行滚动",
+        "Space     下一页；PgUp/PgDn 翻页（到边界自动切章）",
+        "[ / ]     上一章 / 下一章",
+        "g / G     目录首尾 / 正文首尾",
+        "t         聚焦当前章节目录",
+        "Ctrl+B    显示 / 隐藏章节目录",
+        "q / Esc   返回进入阅读前的页面",
+        "",
+        "预览使用演示正文；章节进度仅保留在本次运行中。",
+    ];
+    f.render_widget(
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|line| Line::from(*line))
+                .collect::<Vec<_>>(),
+        )
+        .style(s(THEME.fg)),
+        inset(inner, 1, 1),
     );
 }

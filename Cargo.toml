@@ -2,8 +2,18 @@
 name = "tlegado"
 version = "0.1.0"
 edition = "2021"
+description = "Tlegado — legado 书源规则的终端阅读器 (ratatui 范例)"
 
 [dependencies]
-crossterm = "0.28"
+# TUI 核心
 ratatui = "0.29"
+crossterm = "0.28"
 
+# 工具
+unicode-width = "0.2"
+anyhow = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

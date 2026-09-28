@@ -9,6 +9,8 @@ pub enum Event {
         row: u16,
     },
     Resize(u16, u16),
+    #[allow(dead_code)]
+    Tick,
 }
 
 impl From<CrosstermEvent> for Event {
@@ -21,7 +23,7 @@ impl From<CrosstermEvent> for Event {
                 row: mouse.row,
             },
             CrosstermEvent::Resize(width, height) => Self::Resize(width, height),
-            _ => Self::Resize(0, 0),
+            _ => Self::Tick,
         }
     }
 }

@@ -1,0 +1,353 @@
+//! 模拟数据 —— 字段命名贴近 legado / React 范例。
+
+#[derive(Clone, Debug)]
+pub struct Book {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub author: &'static str,
+    pub kind: Kind,
+    pub origin: &'static str, // 网络书源名 或 本地路径
+    pub group: &'static str,
+    pub category: &'static str,
+    pub status: &'static str, // 连载 / 完结
+    pub words: &'static str,
+    pub total: u32,
+    pub read: u32, // 0-based chapter index
+    pub latest: &'static str,
+    pub last_read: &'static str,
+    pub new_count: u32,
+    pub intro: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Local,
+    Network,
+}
+
+#[derive(Clone, Debug)]
+pub struct Source {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub group: &'static str,
+    pub url: &'static str,
+    pub enabled: bool,
+    pub explore: bool,
+    pub respond_ms: i32, // -1 = 超时
+    pub categories: &'static [&'static str],
+}
+
+pub fn shelf() -> Vec<Book> {
+    vec![
+        Book {
+            id: "b1",
+            title: "诡秘之主",
+            author: "爱潜水的乌贼",
+            kind: Kind::Network,
+            origin: "起点中文网",
+            group: "完结",
+            category: "玄幻",
+            status: "完结",
+            words: "446.5万",
+            total: 1432,
+            read: 812,
+            latest: "第1432章 新的征程",
+            last_read: "10分钟前",
+            new_count: 0,
+            intro: "蒸汽与机械的浪潮中，谁能触及非凡？历史和黑暗的迷雾里，又是谁在耳语？",
+        },
+        Book {
+            id: "b2",
+            title: "道诡异仙",
+            author: "狐尾的笔",
+            kind: Kind::Network,
+            origin: "起点中文网",
+            group: "追更",
+            category: "仙侠",
+            status: "连载",
+            words: "312.8万",
+            total: 1068,
+            read: 1062,
+            latest: "第1068章 心素",
+            last_read: "2小时前",
+            new_count: 6,
+            intro: "诡异的天道，异常的仙佛，是真？是假？陷入迷惘的李火旺无法分辨。",
+        },
+        Book {
+            id: "b3",
+            title: "大奉打更人",
+            author: "卖报小郎君",
+            kind: Kind::Network,
+            origin: "番茄小说",
+            group: "完结",
+            category: "仙侠",
+            status: "完结",
+            words: "380.2万",
+            total: 1284,
+            read: 355,
+            latest: "第1284章 大结局",
+            last_read: "昨天 22:14",
+            new_count: 0,
+            intro: "这个世界，有儒；有道；有佛；有妖；有术士。",
+        },
+        Book {
+            id: "b4",
+            title: "深空彼岸",
+            author: "辰东",
+            kind: Kind::Network,
+            origin: "笔趣阁①",
+            group: "追更",
+            category: "科幻",
+            status: "连载",
+            words: "402.1万",
+            total: 1520,
+            read: 1498,
+            latest: "第1520章 彼岸花开",
+            last_read: "3天前",
+            new_count: 22,
+            intro: "浩瀚的宇宙中，一片星系的生灭，也不过是刹那的斑驳流光。",
+        },
+        Book {
+            id: "b5",
+            title: "凡人修仙传",
+            author: "忘语",
+            kind: Kind::Network,
+            origin: "纵横中文网",
+            group: "经典",
+            category: "仙侠",
+            status: "完结",
+            words: "771.6万",
+            total: 2446,
+            read: 2446,
+            latest: "第2446章 飞升仙界",
+            last_read: "上周",
+            new_count: 0,
+            intro: "一个普通山村小子，偶然下进入到当地江湖小门派。",
+        },
+        Book {
+            id: "b6",
+            title: "我在精神病院学斩神",
+            author: "三九音域",
+            kind: Kind::Network,
+            origin: "番茄小说",
+            group: "追更",
+            category: "都市",
+            status: "连载",
+            words: "298.4万",
+            total: 1356,
+            read: 901,
+            latest: "第1356章 天庭",
+            last_read: "5天前",
+            new_count: 3,
+            intro: "你是否想过，在霓虹璀璨的都市之下，潜藏着来自古老神话的怪物？",
+        },
+        Book {
+            id: "b7",
+            title: "三体",
+            author: "刘慈欣",
+            kind: Kind::Local,
+            origin: "~/Books/三体全集.epub",
+            group: "经典",
+            category: "科幻",
+            status: "完结",
+            words: "88.0万",
+            total: 104,
+            read: 37,
+            latest: "第104章 尾声",
+            last_read: "1小时前",
+            new_count: 0,
+            intro: "文化大革命如火如荼进行的同时，军方探寻外星文明的绝秘计划取得了突破。",
+        },
+        Book {
+            id: "b8",
+            title: "活着",
+            author: "余华",
+            kind: Kind::Local,
+            origin: "~/Books/活着.txt",
+            group: "经典",
+            category: "文学",
+            status: "完结",
+            words: "12.1万",
+            total: 12,
+            read: 12,
+            latest: "第12章 老人与牛",
+            last_read: "上个月",
+            new_count: 0,
+            intro: "讲述了一个人历尽世间沧桑和磨难的一生。",
+        },
+        Book {
+            id: "b9",
+            title: "百年孤独",
+            author: "加西亚·马尔克斯",
+            kind: Kind::Local,
+            origin: "~/Books/百年孤独.epub",
+            group: "经典",
+            category: "文学",
+            status: "完结",
+            words: "25.3万",
+            total: 20,
+            read: 4,
+            latest: "第20章",
+            last_read: "2周前",
+            new_count: 0,
+            intro: "多年以后，面对行刑队，奥雷里亚诺·布恩迪亚上校将会回想起……",
+        },
+        Book {
+            id: "b10",
+            title: "围城",
+            author: "钱锺书",
+            kind: Kind::Local,
+            origin: "~/Books/围城.txt",
+            group: "经典",
+            category: "文学",
+            status: "完结",
+            words: "23.0万",
+            total: 9,
+            read: 0,
+            latest: "第9章",
+            last_read: "未读",
+            new_count: 0,
+            intro: "城外的人想冲进去，城里的人想逃出来。",
+        },
+    ]
+}
+
+pub fn sources() -> Vec<Source> {
+    vec![
+        Source {
+            id: "s1",
+            name: "起点中文网",
+            group: "正版",
+            url: "https://www.qidian.com",
+            enabled: true,
+            explore: true,
+            respond_ms: 212,
+            categories: &["玄幻", "奇幻", "仙侠", "都市", "历史", "科幻", "悬疑"],
+        },
+        Source {
+            id: "s2",
+            name: "番茄小说",
+            group: "正版",
+            url: "https://fanqienovel.com",
+            enabled: true,
+            explore: true,
+            respond_ms: 188,
+            categories: &["男频热榜", "女频热榜", "新书榜", "完结榜", "巅峰榜"],
+        },
+        Source {
+            id: "s3",
+            name: "笔趣阁①",
+            group: "聚合",
+            url: "https://www.biquge.example",
+            enabled: true,
+            explore: true,
+            respond_ms: 540,
+            categories: &["玄幻魔法", "武侠修真", "都市言情", "历史军事", "排行榜"],
+        },
+        Source {
+            id: "s4",
+            name: "纵横中文网",
+            group: "正版",
+            url: "https://www.zongheng.com",
+            enabled: true,
+            explore: true,
+            respond_ms: 301,
+            categories: &["月票榜", "畅销榜", "新书榜", "完本"],
+        },
+        Source {
+            id: "s5",
+            name: "晋江文学城",
+            group: "正版",
+            url: "https://www.jjwxc.net",
+            enabled: true,
+            explore: true,
+            respond_ms: 422,
+            categories: &["言情", "纯爱", "衍生", "无CP", "完结金榜"],
+        },
+        Source {
+            id: "s6",
+            name: "七猫小说",
+            group: "正版",
+            url: "https://www.qimao.com",
+            enabled: true,
+            explore: false,
+            respond_ms: 260,
+            categories: &[],
+        },
+        Source {
+            id: "s7",
+            name: "69书吧",
+            group: "聚合",
+            url: "https://www.69shu.example",
+            enabled: false,
+            explore: true,
+            respond_ms: 690,
+            categories: &["全部", "排行"],
+        },
+        Source {
+            id: "s8",
+            name: "书海阁",
+            group: "聚合",
+            url: "https://www.shuhai.example",
+            enabled: false,
+            explore: false,
+            respond_ms: -1,
+            categories: &[],
+        },
+    ]
+}
+
+/// 发现页的假数据（按 seed 稳定生成）
+pub fn discover_books(source_name: &str, cat: &str) -> Vec<Book> {
+    const POOL: &[(&str, &str, &str)] = &[
+        ("剑来", "烽火戏诸侯", "仙侠"),
+        ("雪中悍刀行", "烽火戏诸侯", "武侠"),
+        ("庆余年", "猫腻", "历史"),
+        ("将夜", "猫腻", "玄幻"),
+        ("赤心巡天", "情何以甚", "仙侠"),
+        ("灵境行者", "卖报小郎君", "都市"),
+        ("宿命之环", "爱潜水的乌贼", "奇幻"),
+        ("夜的命名术", "会说话的肘子", "都市"),
+        ("十日终焉", "杀虫队队员", "悬疑"),
+        ("光阴之外", "耳根", "仙侠"),
+        ("神秘复苏", "佛前献花", "悬疑"),
+        ("学霸的黑科技系统", "晨星LL", "科幻"),
+        ("临高启明", "吹牛者", "历史"),
+        ("全职高手", "蝴蝶蓝", "网游"),
+        ("遮天", "辰东", "玄幻"),
+        ("长安的荔枝", "马伯庸", "历史"),
+        ("星门", "老鹰吃小鸡", "都市"),
+        ("黎明之剑", "远瞳", "奇幻"),
+    ];
+    let seed = source_name.len() * 17 + cat.len() * 31;
+    let n = 9 + (seed % 5);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let (title, author, category) = POOL[(seed + i * 7) % POOL.len()];
+        if out.iter().any(|b: &Book| b.title == title) {
+            continue;
+        }
+        let total = 300 + ((seed + i * 13) % 2200) as u32;
+        let done = (seed + i) % 3 == 0;
+        out.push(Book {
+            id: title, // 演示书池标题唯一，避免不同书籍共用 ID。
+            title,
+            author,
+            kind: Kind::Network,
+            origin: "—", // 绘制时用 source_name 覆盖显示
+            group: "未分组",
+            category,
+            status: if done { "完结" } else { "连载" },
+            words: "—",
+            total,
+            read: 0,
+            latest: "最新章节",
+            last_read: "未读",
+            new_count: 0,
+            intro: "发现页示例简介。",
+        });
+    }
+    // origin 无法改 &'static，绘制时单独显示 source_name
+    let _ = source_name;
+    out
+}
