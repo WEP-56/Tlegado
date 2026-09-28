@@ -38,6 +38,29 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_body(f, app, chunks[2]);
     draw_footer(f, app, chunks[3]);
 
+    if let Some(input) = app.live.as_ref().and_then(|l| l.prompt.as_ref()) {
+        let rect = center_rect(area, 76, 8);
+        ratatui::widgets::Clear.render(rect, f.buffer_mut());
+        let title = match input.kind {
+            crate::live::InputKind::Import => "导入 Legado JSON",
+            crate::live::InputKind::Export => "导出书源（新文件）",
+        };
+        let block = panel(vec![Span::styled(title, sb(THEME.mag))], None, true);
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let text = format!(
+            "文件路径：\n{}▋\n\nEnter 确认 · Esc 取消 · 支持含空格路径",
+            input.text
+        );
+        f.render_widget(
+            Paragraph::new(text)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(s(THEME.fg)),
+            inner,
+        );
+        return;
+    }
+
     if app.help {
         if app.reader.is_some() {
             draw_reader_help(f, area);
@@ -65,7 +88,14 @@ fn draw_topbar(f: &mut Frame, app: &App, area: Rect) {
         Focus::Main => "主体",
     };
     let left = Line::from(vec![
-        Span::styled("~/.tlegado ", s(THEME.mute)),
+        Span::styled(
+            if app.live.is_some() {
+                "Tlegado "
+            } else {
+                "演示 "
+            },
+            s(THEME.mute),
+        ),
         Span::styled("› ", s(THEME.dim)),
         Span::styled(app.crumb(), s(THEME.fg)),
     ]);
@@ -108,6 +138,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("{icon} "), s(color)),
             Span::styled(msg.clone(), s(color)),
         ])
+    } else if let Some(live) = app.live.as_ref().filter(|l| !l.status.is_empty()) {
+        let prefix = if live.busy() {
+            theme::SPINNER[app.tick as usize % theme::SPINNER.len()]
+        } else {
+            "●"
+        };
+        Line::from(Span::styled(
+            format!("{prefix} {}", live.status),
+            s(THEME.info),
+        ))
     } else if area.width < 70 {
         hints(&[
             ("tab", "焦点"),
@@ -331,9 +371,23 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
             s(THEME.mute),
         ),
         Span::styled(format!("{enabled}/{}", app.sources.len()), s(THEME.fg)),
-        Span::styled(" 可用，书架 ", s(THEME.mute)),
-        Span::styled(format!("{updates}"), s(THEME.accent)),
-        Span::styled(" 章更新待读。", s(THEME.mute)),
+        Span::styled(" 已启用，书架 ", s(THEME.mute)),
+        Span::styled(
+            if app.live.is_some() {
+                app.books.len().to_string()
+            } else {
+                updates.to_string()
+            },
+            s(THEME.accent),
+        ),
+        Span::styled(
+            if app.live.is_some() {
+                " 本书籍。"
+            } else {
+                " 章更新待读。"
+            },
+            s(THEME.mute),
+        ),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
@@ -352,7 +406,14 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
         ("打开书架", "b"),
         ("发现 · 按书源浏览", "e"),
         ("搜索书籍", "/"),
-        ("导入本地书籍", "o"),
+        (
+            if app.live.is_some() {
+                "本地书籍（待接入）"
+            } else {
+                "导入本地书籍"
+            },
+            "o",
+        ),
         ("书源管理", "s"),
         ("快捷键帮助", "?"),
     ];
@@ -364,14 +425,21 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("今日阅读  ", s(THEME.dim)),
-        Span::styled("2小时05分", s(THEME.hi)),
-        Span::styled("    本周章节  ", s(THEME.dim)),
-        Span::styled("146 章", s(THEME.hi)),
-        Span::styled("    缓存  ", s(THEME.dim)),
-        Span::styled("38.2 MB", s(THEME.hi)),
-    ]));
+    if app.live.is_some() {
+        lines.push(Line::from(Span::styled(
+            "阅读进度自动保存 · 阅读时长统计待接入",
+            s(THEME.dim),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("今日阅读  ", s(THEME.dim)),
+            Span::styled("2小时05分", s(THEME.hi)),
+            Span::styled("    本周章节  ", s(THEME.dim)),
+            Span::styled("146 章", s(THEME.hi)),
+            Span::styled("    缓存  ", s(THEME.dim)),
+            Span::styled("38.2 MB", s(THEME.hi)),
+        ]));
+    }
 
     f.render_widget(
         Paragraph::new(lines).style(sbg(THEME.fg, THEME.bg)),
@@ -477,7 +545,7 @@ fn draw_shelf(f: &mut Frame, app: &App, area: Rect, filter: ShelfFilter) {
             title = format!("{} +{}", b.title, b.new_count);
         }
         let origin = match b.kind {
-            Kind::Local => format!("本地"),
+            Kind::Local => "本地".to_string(),
             Kind::Network => b.origin.to_string(),
         };
 
@@ -486,7 +554,7 @@ fn draw_shelf(f: &mut Frame, app: &App, area: Rect, filter: ShelfFilter) {
                 pad(&title, 14),
                 if sel { sb(THEME.hi) } else { s(THEME.fg) },
             ),
-            Span::styled(pad(b.author, 10), s(THEME.mute)),
+            Span::styled(pad(&b.author, 10), s(THEME.mute)),
         ];
         content.extend(bar_spans(progress, 8));
         content.push(Span::styled(format!(" {pct}% "), s(THEME.dim)));
@@ -524,9 +592,9 @@ fn draw_book_detail(f: &mut Frame, b: &crate::data::Book, area: Rect, focused: b
 
     let progress = (b.read as f64 + if b.read > 0 { 1.0 } else { 0.0 }) / b.total.max(1) as f64;
 
-    let mut lines: Vec<Line> = vec![
-        Line::from(Span::styled(b.title, sb(THEME.hi))),
-        Line::from(Span::styled(b.author, s(THEME.mute))),
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled(&b.title, sb(THEME.hi))),
+        Line::from(Span::styled(&b.author, s(THEME.mute))),
         Line::from(vec![
             Span::styled(format!("#{} ", b.category), s(THEME.info)),
             Span::styled(
@@ -540,10 +608,10 @@ fn draw_book_detail(f: &mut Frame, b: &crate::data::Book, area: Rect, focused: b
             Span::styled(format!("#{}字", b.words), s(THEME.dim)),
         ]),
         Line::from(""),
-        kv("来源", b.origin),
+        kv("来源", &b.origin),
         kv("章节", &format!("{} 章", b.total)),
-        kv("最新", b.latest),
-        kv("上次", b.last_read),
+        kv("最新", &b.latest),
+        kv("上次", &b.last_read),
         Line::from(""),
         Line::from({
             let mut spans = bar_spans(progress, 18);
@@ -556,7 +624,7 @@ fn draw_book_detail(f: &mut Frame, b: &crate::data::Book, area: Rect, focused: b
         Line::from(""),
         Line::from(Span::styled("简介", s(THEME.dim))),
         Line::from(Span::styled(
-            truncate(b.intro, (inner.width as usize).saturating_sub(2)),
+            truncate(&b.intro, (inner.width as usize).saturating_sub(2)),
             s(THEME.fg),
         )),
     ];
@@ -582,7 +650,7 @@ fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
         None => return,
     };
     let list = app.discover_list(source_idx);
-    let cats = source.categories;
+    let cats = &source.categories;
 
     let lat = if source.respond_ms < 0 {
         "超时".to_string()
@@ -659,13 +727,13 @@ fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
         let sel = i == app.discover_sel;
         let content = vec![
             Span::styled(
-                pad(b.title, 14),
+                pad(&b.title, 14),
                 if sel { sb(THEME.hi) } else { s(THEME.fg) },
             ),
-            Span::styled(pad(b.author, 10), s(THEME.mute)),
-            Span::styled(pad(b.category, 6), s(THEME.info)),
+            Span::styled(pad(&b.author, 10), s(THEME.mute)),
+            Span::styled(pad(&b.category, 6), s(THEME.info)),
             Span::styled(
-                b.status,
+                &b.status,
                 if b.status == "完结" {
                     s(THEME.ok)
                 } else {
@@ -761,7 +829,11 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
     if app.search_query.trim().is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  输入关键词后按 Enter。试试「诡秘」「三体」「远瞳」。",
+                if app.live.is_some() {
+                    "  导入书源后，输入书名或作者并按 Enter 搜索。"
+                } else {
+                    "  输入关键词后按 Enter。试试「诡秘」「三体」「远瞳」。"
+                },
                 s(THEME.dim),
             ))),
             list_area,
@@ -789,15 +861,15 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         let sel = i == app.search_sel;
         let content = vec![
             Span::styled(
-                pad(b.title, 16),
+                pad(&b.title, 16),
                 if sel { sb(THEME.hi) } else { s(THEME.fg) },
             ),
-            Span::styled(pad(b.author, 12), s(THEME.mute)),
+            Span::styled(pad(&b.author, 12), s(THEME.mute)),
             Span::styled(
                 if b.kind == Kind::Local {
                     "本地"
                 } else {
-                    b.origin
+                    b.origin.as_str()
                 },
                 s(THEME.info),
             ),

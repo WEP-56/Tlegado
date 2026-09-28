@@ -16,7 +16,7 @@ use ratatui::{
 #[derive(Clone)]
 pub struct History {
     pub book: Book,
-    pub time: &'static str,
+    pub time: String,
 }
 #[derive(Clone)]
 pub struct Rule {
@@ -83,7 +83,7 @@ impl Demo {
                 .map(|mut book| {
                     book.read = book.read.min(book.total.saturating_sub(1));
                     History {
-                        time: book.last_read,
+                        time: book.last_read.clone(),
                         book,
                     }
                 })
@@ -131,7 +131,7 @@ impl Demo {
             0,
             History {
                 book,
-                time: "本次阅读",
+                time: "本次阅读".into(),
             },
         );
         self.history_sel = 0;
@@ -277,6 +277,13 @@ impl App {
         }
     }
     pub(crate) fn add_demo_book(&mut self, book: Book) {
+        if let Some(live) = &self.live {
+            if let Some(domain) = live.domain.get(&book.id) {
+                self.commands
+                    .push(crate::jobs::Command::Add(domain.clone()));
+            }
+            return;
+        }
         if self
             .books
             .iter()
@@ -284,7 +291,7 @@ impl App {
         {
             self.toast("这本书已在书架中", ToastTone::Info);
         } else {
-            let title = book.title;
+            let title = book.title.clone();
             self.books.push(book);
             self.rebuild_nav();
             self.toast(format!("已将《{title}》加入书架"), ToastTone::Ok);
@@ -300,11 +307,7 @@ fn panes(area: Rect) -> (Rect, Rect) {
         } else {
             Direction::Vertical
         })
-        .constraints(if wide {
-            vec![Constraint::Percentage(55), Constraint::Percentage(45)]
-        } else {
-            vec![Constraint::Percentage(55), Constraint::Percentage(45)]
-        })
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
     (chunks[0], chunks[1])
 }
@@ -355,7 +358,14 @@ fn list(
     f.render_widget(block, area);
     if rows.is_empty() {
         f.render_widget(
-            Paragraph::new("暂无记录 · 阅读后会出现在这里").style(s(THEME.dim)),
+            Paragraph::new(
+                if matches!(app.route(), Route::Sources) && app.live.is_some() {
+                    "暂无书源 · 按 i 导入 Legado JSON"
+                } else {
+                    "暂无记录"
+                },
+            )
+            .style(s(THEME.dim)),
             inner,
         );
         return;
@@ -404,17 +414,17 @@ pub fn source_json(source: &Source) -> String {
         format!(
             "  {}: {},",
             json_string("bookSourceName"),
-            json_string(source.name)
+            json_string(&source.name)
         ),
         format!(
             "  {}: {},",
             json_string("bookSourceUrl"),
-            json_string(source.url)
+            json_string(&source.url)
         ),
         format!(
             "  {}: {},",
             json_string("bookSourceGroup"),
-            json_string(source.group)
+            json_string(&source.group)
         ),
         format!("  {}: {},", json_string("enabled"), source.enabled),
         format!("  {}: {}", json_string("enabledExplore"), source.explore),
@@ -428,8 +438,16 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             details(
                 f,
                 area,
-                "JSON 预览 · v/Esc 返回 · 非完整解析规则",
-                source_json(source),
+                if app.live.is_some() {
+                    "书源 JSON · v/Esc 返回"
+                } else {
+                    "JSON 预览 · v/Esc 返回 · 非完整解析规则"
+                },
+                app.live
+                    .as_ref()
+                    .and_then(|l| l.sources.iter().find(|s| s.book_source_url == source.id))
+                    .and_then(|s| serde_json::to_string_pretty(s).ok())
+                    .unwrap_or_else(|| source_json(source)),
                 &mut app.demo.detail_scroll,
             );
         }
@@ -445,7 +463,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 .map(|h| {
                     format!(
                         "{}  {} · 第{}章",
-                        pad(h.book.title, 20),
+                        pad(&h.book.title, 20),
                         h.time,
                         h.book.read + 1
                     )
@@ -468,11 +486,19 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     [
                         h.book.title.to_string(),
                         h.book.author.to_string(),
-                        chapter_title(h.book.read),
+                        app.live
+                            .as_ref()
+                            .and_then(|l| l.domain.get(&h.book.id))
+                            .and_then(|b| b.dur_chapter_title.clone())
+                            .unwrap_or_else(|| chapter_title(h.book.read)),
                         h.book.origin.to_string(),
                         String::new(),
                         "Enter 从此章节继续阅读".into(),
-                        "记录仅保留在本次运行".into(),
+                        if app.live.is_some() {
+                            "进度已保存到本地数据目录".into()
+                        } else {
+                            "记录仅保留在本次运行".into()
+                        },
                     ]
                     .join(&char::from(10).to_string())
                 })
@@ -489,7 +515,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     format!(
                         "{} {} {} {}",
                         if source.enabled { "●" } else { "○" },
-                        pad(source.name, 16),
+                        pad(&source.name, 16),
                         if source.explore {
                             "探索开"
                         } else {
@@ -503,8 +529,16 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 f,
                 app,
                 left,
-                "书源管理 · 离线演示",
-                "空格 启停  e 探索  t 测试  v JSON",
+                if app.live.is_some() {
+                    "书源管理 · Legado"
+                } else {
+                    "书源管理 · 离线演示"
+                },
+                if app.live.is_some() {
+                    "i 导入  o 导出  空格 启停  e 探索  v JSON"
+                } else {
+                    "空格 启停  e 探索  t 测试  v JSON"
+                },
                 app.demo.source_sel,
                 rows,
             );
@@ -514,13 +548,25 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     format!("分组：{}", source.group),
                     source.url.to_string(),
                     format!("分类：{}", source.categories.join(" / ")),
-                    format!(
-                        "测试：{}（模拟）",
-                        app.demo.checks[app.demo.source_sel].label()
-                    ),
-                    "T 测试全部 · c 取消测试".into(),
-                    "仅模拟延时与超时，无网络请求。".into(),
-                    "v 查看 JSON 字段预览".into(),
+                    if app.live.is_some() {
+                        "导入与启停状态已持久化".into()
+                    } else {
+                        format!(
+                            "测试：{}（模拟）",
+                            app.demo.checks[app.demo.source_sel].label()
+                        )
+                    },
+                    if app.live.is_some() {
+                        "i 导入 JSON · o 导出到新文件".into()
+                    } else {
+                        "T 测试全部 · c 取消测试".into()
+                    },
+                    if app.live.is_some() {
+                        "/ 搜索 · Enter 打开书籍".into()
+                    } else {
+                        "仅模拟延时与超时，无网络请求。".into()
+                    },
+                    "v 查看 JSON".into(),
                 ]
                 .join(&char::from(10).to_string());
                 details(f, right, "书源详情", text, &mut app.demo.detail_scroll);

@@ -12,6 +12,10 @@ Tlegado 是一个只面向终端的 Legado 阅读器。它复用 Legado/Reader �
 
 ### 2.1 `legado-example/reader`
 
+该参考目录已于 2026-09-28 整理为独立 Rust 库：Vue 前端、Tauri 桌面壳、Node/Playwright 配置和桌面构建脚本移至同级 `reader-archived-app-20260928/`，清理前完整快照另存为 `reader-before-cleanup-20260928.zip`。核心 Cargo 配置不再依赖 Tauri 或桌面 workspace 成员。
+
+原 `src/api/` 移至 `reference/tauri-api/`，不参与编译；其中备份、WebDAV、多源搜索等尚未下沉的业务编排仍保留供移植。初始化流程保留在 `src/app/bootstrap.rs`，服务容器移至 `src/app/state.rs`。Rust 回归测试、SQLite 迁移、PDF vendor 补丁及许可证均保留。该目录仍是 Git 忽略的本地参考；正式使用的领域代码现已复制至受版本控制的 `crates/legado-core`，不依赖参考目录存在。
+
 这是领域能力的主要参考实现，当前代码已经包含：
 
 - `model/`：Book、BookChapter、BookSource、BookGroup、SearchBook、规则对象等 Legado 数据模型。
@@ -47,6 +51,10 @@ Tlegado 不复制其业务模块，而采用这些交互和事件分发约定。
 React 范例只作为交互规格和页面草图，不作为运行时依赖；所有页面最终由 Ratatui 渲染。
 
 ## 3. 总体架构
+
+2026-09-28 已落地的首个闭环：`main.rs` 管理终端与事件循环；`live.rs` 将领域数据适配为现有界面并提交命令；`jobs.rs` 管理 Tokio 读取任务、过期结果过滤和串行持久化；`backend.rs` 调用 `crates/legado-core` 的书源、书籍、解析、网络与存储能力。正常启动为真实模式，`--demo` 保留演示。网络/数据库不在绘制线程执行。
+
+已接入 JSON 原子导入/导出、启停、搜索/发现第一页、详情/目录/正文、章节缓存、书架/历史与阅读进度。读取并发最多 4，取消采用停止后续调度和过滤结果；退出前排空已提交的保存命令。阅读位置按原始正文的 Unicode 字符偏移保存，终端宽度改变后重新排版定位。以下架构和目录结构仍包含后续演进目标。
 
 ```text
 main / terminal bootstrap
@@ -168,4 +176,3 @@ src/tui/
 - 新增页面先写状态转移和快捷键，再写绘制；新增鼠标操作必须补同语义键盘操作。
 - 不在组件中启动不可追踪的后台任务；任务统一登记、可取消并回传结果。
 - 提交前检查终端退出恢复、错误路径和空状态；不要只验证有数据、宽终端和成功网络。
-

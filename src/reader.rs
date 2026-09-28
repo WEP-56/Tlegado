@@ -1,4 +1,4 @@
-//! 离线阅读预览；正文为原创演示文本，不是书籍原文。
+//! 阅读排版与章节导航；真实正文与显式演示模式共享渲染。
 use crate::data::Book;
 use crate::theme::{list_scroll, panel, row_line, s, sb, truncate, THEME};
 use ratatui::{
@@ -10,6 +10,8 @@ use ratatui::{
 use unicode_width::UnicodeWidthChar;
 
 pub struct Reader {
+    pub request: Option<(u32, bool)>,
+    real: Option<RealText>,
     pub options: crate::demo::Prefs,
     pub rules: Vec<crate::demo::Rule>,
     pub book: Book,
@@ -20,6 +22,13 @@ pub struct Reader {
     lines: Vec<String>,
     width: u16,
     height: usize,
+}
+
+struct RealText {
+    titles: Vec<String>,
+    text: String,
+    positions: Vec<usize>,
+    restore: Option<usize>,
 }
 
 pub fn chapter_title(index: u32) -> String {
@@ -40,6 +49,8 @@ impl Reader {
     pub fn new(book: Book, previous_sidebar_hidden: bool) -> Self {
         let chapter = book.read.min(book.total.saturating_sub(1));
         Self {
+            request: None,
+            real: None,
             options: crate::demo::Prefs::default(),
             rules: Vec::new(),
             book,
@@ -59,6 +70,10 @@ impl Reader {
     }
 
     pub fn open_selected(&mut self) {
+        if self.real.is_some() {
+            self.request = Some((self.selected, false));
+            return;
+        }
         let width = self.width;
         self.chapter = self.selected;
         self.offset = 0;
@@ -85,6 +100,10 @@ impl Reader {
             return;
         }
         if delta < 0 && self.offset == 0 && self.chapter > 0 {
+            if self.real.is_some() {
+                self.request = Some((self.chapter - 1, true));
+                return;
+            }
             self.change_chapter(-1);
             self.offset = self.max_offset();
             return;
@@ -108,8 +127,97 @@ impl Reader {
         self.lines.len().saturating_sub(self.height)
     }
 
+    pub fn is_real(&self) -> bool {
+        self.real.is_some()
+    }
+
+    pub fn title(&self, index: u32) -> String {
+        self.real
+            .as_ref()
+            .and_then(|r| r.titles.get(index as usize))
+            .cloned()
+            .unwrap_or_else(|| chapter_title(index))
+    }
+
+    pub fn set_real(&mut self, titles: Vec<String>, text: String, position: usize) {
+        self.real = Some(RealText {
+            titles,
+            text,
+            positions: vec![],
+            restore: Some(position),
+        });
+        self.width = 0;
+    }
+
+    pub fn set_chapter(&mut self, index: u32, text: String, end: bool) {
+        if let Some(real) = &mut self.real {
+            real.restore = Some(if end { text.chars().count() } else { 0 });
+            real.text = text;
+            real.positions.clear();
+        }
+        self.chapter = index;
+        self.selected = index;
+        self.offset = 0;
+        self.width = 0;
+        self.lines.clear();
+    }
+
+    /// Tlegado stores a Unicode scalar offset here, never a terminal row number.
+    pub fn position(&self) -> usize {
+        self.real
+            .as_ref()
+            .map(|r| {
+                r.restore
+                    .unwrap_or_else(|| r.positions.get(self.offset).copied().unwrap_or(0))
+            })
+            .unwrap_or(0)
+    }
+
     fn prepare(&mut self, width: u16, height: u16) {
         if width == 0 || height == 0 {
+            return;
+        }
+        let position = self.position();
+        if let Some(real) = &mut self.real {
+            self.height = height as usize;
+            if self.width != width {
+                self.lines.clear();
+                real.positions.clear();
+                let indent = if self.options.0[3] == 1 { "　　" } else { "" };
+                let mut base = 0;
+                for paragraph in real.text.split('\n') {
+                    let decorated = format!("{indent}{paragraph}");
+                    let wrapped = wrap(&decorated, width as usize);
+                    let mut used: usize = 0;
+                    for line in wrapped {
+                        real.positions.push(
+                            base + used
+                                .saturating_sub(indent.chars().count())
+                                .min(paragraph.chars().count()),
+                        );
+                        used += line.chars().count();
+                        self.lines.push(line);
+                        if self.options.0[2] == 1 {
+                            real.positions.push(
+                                base + used
+                                    .saturating_sub(indent.chars().count())
+                                    .min(paragraph.chars().count()),
+                            );
+                            self.lines.push(String::new());
+                        }
+                    }
+                    real.positions.push(base + paragraph.chars().count());
+                    self.lines.push(String::new());
+                    base += paragraph.chars().count() + 1;
+                }
+                self.offset = real
+                    .positions
+                    .partition_point(|p| *p <= position)
+                    .saturating_sub(1);
+                real.restore = None;
+                self.width = width;
+            }
+            self.offset = self.offset.min(self.max_offset());
             return;
         }
         if self.width != width {
@@ -157,6 +265,63 @@ const PARAGRAPHS: [&str; 6] = [
     "门后没有预想中的黑暗。一张木桌、一杯温茶，还有另一封信，静静等待着来人。他忽然觉得，这段旅程也许才刚刚开始。（演示站点水印）",
 ];
 
+#[cfg(test)]
+mod real_tests {
+    use super::*;
+    fn reader() -> Reader {
+        let mut book = crate::data::shelf().remove(0);
+        book.read = 0;
+        book.total = 2;
+        let mut reader = Reader::new(book, false);
+        reader.set_real(
+            vec!["真实第一章".into(), "真实第二章".into()],
+            "中文段落 English 内容。".repeat(150),
+            0,
+        );
+        reader.prepare(44, 12);
+        reader
+    }
+    #[test]
+    fn character_progress_restores_after_width_change() {
+        let mut original = reader();
+        original.page(true);
+        let position = original.position();
+        assert!(
+            position > 12,
+            "position must be characters, not screen rows"
+        );
+        let mut reopened = reader();
+        reopened.set_real(
+            vec!["真实第一章".into(), "真实第二章".into()],
+            "中文段落 English 内容。".repeat(150),
+            position,
+        );
+        assert_eq!(
+            reopened.position(),
+            position,
+            "unrendered progress must not reset to zero"
+        );
+        reopened.prepare(28, 12);
+        assert!(reopened.position() <= position);
+        assert!(position - reopened.position() < 30);
+    }
+    #[test]
+    fn real_chapter_changes_wait_for_successful_load() {
+        let mut reader = reader();
+        reader.offset = reader.max_offset();
+        reader.page(true);
+        assert_eq!(reader.request, Some((1, false)));
+        assert_eq!(reader.chapter, 0);
+        reader.set_chapter(1, "第二章实际内容".repeat(100), false);
+        reader.prepare(44, 12);
+        assert_eq!(reader.chapter, 1);
+        assert!(reader.lines.join("").contains("第二章实际内容"));
+        reader.page(false);
+        assert_eq!(reader.request, Some((0, true)));
+        assert_eq!(reader.chapter, 1);
+    }
+}
+
 pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -191,7 +356,7 @@ pub fn draw_chapters(f: &mut Frame, reader: &Reader, area: Rect, focused: bool) 
         return;
     }
     f.render_widget(
-        Paragraph::new(truncate(reader.book.title, inner.width as usize)).style(s(THEME.accent)),
+        Paragraph::new(truncate(&reader.book.title, inner.width as usize)).style(s(THEME.accent)),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let height = inner.height.saturating_sub(2);
@@ -208,7 +373,7 @@ pub fn draw_chapters(f: &mut Frame, reader: &Reader, area: Rect, focused: bool) 
         let title = format!(
             "{}{}",
             if current { "● " } else { "  " },
-            chapter_title(index as u32)
+            reader.title(index as u32)
         );
         let line = row_line(
             index as u32 == reader.selected,
@@ -232,10 +397,17 @@ pub fn draw_chapters(f: &mut Frame, reader: &Reader, area: Rect, focused: bool) 
 pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) {
     let block = panel(
         vec![
-            Span::styled(reader.book.title, sb(THEME.hi)),
+            Span::styled(&reader.book.title, sb(THEME.hi)),
             Span::styled(format!(" · {}", reader.book.author), s(THEME.dim)),
         ],
-        Some(Span::styled("阅读预览", s(THEME.accent))),
+        Some(Span::styled(
+            if reader.is_real() {
+                "正文"
+            } else {
+                "阅读预览"
+            },
+            s(THEME.accent),
+        )),
         focused,
     );
     let inner = block.inner(area);
@@ -254,7 +426,7 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
     let content = Rect::new(x, inner.y + 3, width, inner.height - 5);
     reader.prepare(content.width, content.height);
     f.render_widget(
-        Paragraph::new(chapter_title(reader.chapter))
+        Paragraph::new(reader.title(reader.chapter))
             .style(sb(THEME.hi))
             .centered(),
         Rect::new(x, inner.y + 1, width, 1),
@@ -283,11 +455,16 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
     let page = (reader.offset + reader.height).div_ceil(reader.height);
     let pages = reader.lines.len().div_ceil(reader.height).max(1);
     let status = format!(
-        "第 {}/{} 章 · {}/{} 页 · 演示正文",
+        "第 {}/{} 章 · {}/{} 页 · {}",
         reader.chapter + 1,
         reader.book.total,
         page,
-        pages
+        pages,
+        if reader.is_real() {
+            "进度自动保存"
+        } else {
+            "演示正文"
+        }
     );
     f.render_widget(
         Paragraph::new(status).style(s(THEME.dim)).centered(),

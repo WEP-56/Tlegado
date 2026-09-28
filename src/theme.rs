@@ -147,7 +147,7 @@ pub fn caret(selected: bool, focused: bool) -> Span<'static> {
 }
 
 /// 组装一行：caret + 内容 spans
-pub fn row_line(selected: bool, focused: bool, content: Vec<Span<'static>>) -> Line<'static> {
+pub fn row_line<'a>(selected: bool, focused: bool, content: Vec<Span<'a>>) -> Line<'a> {
     let mut spans = vec![caret(selected, focused)];
     let base = row_style(selected, focused);
     for sp in content {

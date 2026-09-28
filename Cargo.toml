@@ -2,7 +2,12 @@
 name = "tlegado"
 version = "0.1.0"
 edition = "2021"
-description = "Tlegado — legado 书源规则的终端阅读器 (ratatui 范例)"
+description = "Tlegado — 支持 Legado 书源的终端阅读器"
+
+[workspace]
+members = ["crates/legado-core"]
+default-members = ["."]
+resolver = "2"
 
 [dependencies]
 # TUI 核心
@@ -12,6 +17,17 @@ crossterm = "0.28"
 # 工具
 unicode-width = "0.2"
 anyhow = "1"
+reader-core = { package = "reader-rust", path = "crates/legado-core" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+chrono = "0.4"
+
+[dev-dependencies]
+axum = "0.7"
+tempfile = "3"
+
+[patch.crates-io]
+pdf-extract = { path = "crates/legado-core/vendor/pdf-extract" }
 
 [profile.release]
 lto = true

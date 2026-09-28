@@ -1,18 +1,10 @@
-//! Tlegado —— legado 书源规则的终端阅读器（ratatui 范例）
-//!
-//! 运行：
-//!   cargo run
-//!   cargo run --release
-//!
-//! 对照 React 范例看 theme.rs / ui.rs 的注释，重点是：
-//!   1. truecolor 配色（不要用 Color::Yellow）
-//!   2. BorderType::Rounded + title 带 bg 嵌在边框上
-//!   3. 焦点态边框 / 选中行 bg + › caret
-//!   4. unicode-width 算列宽，中英文混排才齐
-
+//! Tlegado: native terminal reader with a headless Legado core.
 mod app;
+mod backend;
 mod data;
 mod demo;
+mod jobs;
+mod live;
 mod reader;
 mod theme;
 mod ui;
@@ -30,74 +22,129 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn main() -> Result<()> {
-    // ── 终端初始化 ──────────────────────────────────────────
-    enable_raw_mode()?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(out);
-    let mut terminal = Terminal::new(backend)?;
+const HELP: &str = "Tlegado — Legado 书源终端阅读器
 
-    // 清一次屏并隐藏光标（ratatui 默认会管，但显式更稳）
-    terminal.clear()?;
+用法：tlegado [--data-dir 路径] [--import-source 文件.json] [--import-only]
+      tlegado --demo
 
-    let res = run(&mut terminal);
+默认启动真实模式，无内置书源。数据保存在 ~/.tlegado，或 TLEGADO_DATA_DIR。
+--import-source 可重复指定；--import-only 导入后退出，不打开终端界面。
+书源管理：i 导入、o 导出、空格启停、e 探索开关、v 查看完整 JSON。
+/ 搜索；Enter 打开并自动加入书架；阅读中 [ / ] 切章，q 返回。
+Esc 取消后台读取；Ctrl+C 保存进度并退出。--demo 为原离线演示。
+";
 
-    // ── 恢复终端（即使 panic / 出错也要走这里）──────────────
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        stdout(),
         LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    res
+        DisableMouseCapture,
+        crossterm::cursor::Show
+    );
+}
+struct TerminalSession;
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    let mut app = App::new();
-    let tick_rate = Duration::from_millis(100); // 10 fps，够 spinner / toast
+fn main() -> Result<()> {
+    let options = backend::Options::parse(std::env::args_os().skip(1))?;
+    if options.help {
+        println!("{HELP}");
+        return Ok(());
+    }
+    if options.import_only {
+        return tokio::runtime::Runtime::new()?.block_on(async {
+            let backend = backend::Backend::open(&options.data_dir).await?;
+            for path in options.imports {
+                let count = backend.import(&path).await?;
+                println!("已导入 {count} 个书源：{}", path.display());
+            }
+            Ok(())
+        });
+    }
+    let bridge = if options.demo {
+        None
+    } else {
+        Some(jobs::Bridge::start(options.data_dir, options.imports)?)
+    };
+    let mut app = if options.demo {
+        App::new()
+    } else {
+        App::new_live()
+    };
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        previous_hook(info);
+    }));
+    let result = (|| -> Result<()> {
+        enable_raw_mode()?;
+        let _session = TerminalSession;
+        let mut out = stdout();
+        execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
+        terminal.clear()?;
+        run(&mut terminal, &mut app, bridge.as_ref())
+    })();
+    app.save_live_progress();
+    let flush = dispatch(&mut app, bridge.as_ref());
+    let shutdown = bridge.map(jobs::Bridge::finish).unwrap_or(Ok(()));
+    result.and(flush).and(shutdown)
+}
+
+fn dispatch(app: &mut App, bridge: Option<&jobs::Bridge>) -> Result<()> {
+    if let Some(bridge) = bridge {
+        for command in std::mem::take(&mut app.commands) {
+            bridge.send(command)?;
+        }
+    }
+    Ok(())
+}
+
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    bridge: Option<&jobs::Bridge>,
+) -> Result<()> {
+    let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
-
     loop {
-        terminal.draw(|f| ui::draw(f, &mut app))?;
-
-        // 事件轮询：有键就处理，否则等 tick
+        if let Some(bridge) = bridge {
+            for event in bridge.poll().take(64) {
+                app.apply_live_event(event);
+            }
+        }
+        app.sync_live();
+        dispatch(app, bridge)?;
+        terminal.draw(|f| ui::draw(f, app))?;
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             match event::read()? {
-                Event::Key(key) => {
-                    // 终端会同时发 Press / Release，只吃 Press
-                    if key.kind == KeyEventKind::Press {
-                        app.on_key(key);
-                    }
-                }
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
                 Event::Mouse(m) => {
-                    // 最小鼠标支持：滚轮 = j/k
-                    // 完整点击选中需要 hit-test，这里留给你扩展
                     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-                    let fake = match m.kind {
+                    let key = match m.kind {
                         MouseEventKind::ScrollDown => Some(KeyCode::Char('j')),
                         MouseEventKind::ScrollUp => Some(KeyCode::Char('k')),
                         _ => None,
                     };
-                    if let Some(code) = fake {
+                    if let Some(code) = key {
                         app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
                     }
-                }
-                Event::Resize(_, _) => {
-                    // ratatui 下一帧自动用新尺寸，这里不用做事
                 }
                 _ => {}
             }
         }
-
         if last_tick.elapsed() >= tick_rate {
             app.on_tick();
             last_tick = Instant::now();
         }
-
+        app.sync_live();
+        dispatch(app, bridge)?;
         if app.should_quit {
             break;
         }

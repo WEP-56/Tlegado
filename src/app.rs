@@ -39,6 +39,8 @@ pub struct NavItem {
 }
 
 pub struct App {
+    pub live: Option<crate::live::Live>,
+    pub commands: Vec<crate::jobs::Command>,
     pub demo: crate::demo::Demo,
     pub reader: Option<crate::reader::Reader>,
     pub books: Vec<Book>,
@@ -78,6 +80,8 @@ impl App {
         let books = data::shelf();
         let sources = data::sources();
         let mut app = Self {
+            live: None,
+            commands: Vec::new(),
             demo: crate::demo::Demo::new(&books, sources.len()),
             reader: None,
             books,
@@ -165,7 +169,7 @@ impl App {
                 items.push(NavItem {
                     id: format!("discover:{}", s.id),
                     section: Some("发现"),
-                    label: s.name.into(),
+                    label: s.name.clone(),
                     route: Route::Discover { source_idx: i },
                     right: format!("{}类", s.categories.len()),
                 });
@@ -241,7 +245,9 @@ impl App {
     }
 
     pub fn on_tick(&mut self) {
-        self.demo.tick(&self.sources);
+        if self.live.is_none() {
+            self.demo.tick(&self.sources);
+        }
         self.tick = self.tick.wrapping_add(1);
         if let Some((_, _, ref mut left)) = self.toast {
             *left = left.saturating_sub(1);
@@ -253,6 +259,9 @@ impl App {
 
     // ── 按键 ────────────────────────────────────────────────
     pub fn on_key(&mut self, key: KeyEvent) {
+        if self.live_key(key) {
+            return;
+        }
         // Ctrl+B 切侧栏
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') {
             self.sidebar_hidden = !self.sidebar_hidden;
@@ -421,7 +430,7 @@ impl App {
                 if let Some(i) = self
                     .nav
                     .iter()
-                    .position(|n| n.id.starts_with("discover:s") && n.id != "discover:search")
+                    .position(|n| matches!(n.route, Route::Discover { .. }))
                 {
                     self.nav_idx = i;
                 } else {
@@ -453,27 +462,21 @@ impl App {
         let groups = self.shelf_groups(filter);
         let len = list.len();
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if len > 0 {
-                    self.shelf_sel = (self.shelf_sel + 1).min(len - 1);
-                }
+            KeyCode::Char('j') | KeyCode::Down if len > 0 => {
+                self.shelf_sel = (self.shelf_sel + 1).min(len - 1);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.shelf_sel = self.shelf_sel.saturating_sub(1);
             }
             KeyCode::Char('g') => self.shelf_sel = 0,
             KeyCode::Char('G') => self.shelf_sel = len.saturating_sub(1),
-            KeyCode::Char('h') | KeyCode::Left => {
-                if !groups.is_empty() {
-                    self.shelf_group = (self.shelf_group + groups.len() - 1) % groups.len();
-                    self.shelf_sel = 0;
-                }
+            KeyCode::Char('h') | KeyCode::Left if !groups.is_empty() => {
+                self.shelf_group = (self.shelf_group + groups.len() - 1) % groups.len();
+                self.shelf_sel = 0;
             }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if !groups.is_empty() {
-                    self.shelf_group = (self.shelf_group + 1) % groups.len();
-                    self.shelf_sel = 0;
-                }
+            KeyCode::Char('l') | KeyCode::Right if !groups.is_empty() => {
+                self.shelf_group = (self.shelf_group + 1) % groups.len();
+                self.shelf_sel = 0;
             }
             KeyCode::Char('s') => {
                 self.shelf_sort = (self.shelf_sort + 1) % 4;
@@ -502,7 +505,7 @@ impl App {
             }
             KeyCode::Char('x') => {
                 if let Some(b) = list.get(self.shelf_sel) {
-                    let id = b.id;
+                    let id = b.id.clone();
                     let title = b.title.to_string();
                     self.books.retain(|x| x.id != id);
                     self.rebuild_nav();
@@ -521,30 +524,24 @@ impl App {
         let cats = self
             .sources
             .get(source_idx)
-            .map(|s| s.categories)
+            .map(|s| s.categories.as_slice())
             .unwrap_or(&[]);
         let books = self.discover_list(source_idx);
         let len = books.len();
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if len > 0 {
-                    self.discover_sel = (self.discover_sel + 1).min(len - 1);
-                }
+            KeyCode::Char('j') | KeyCode::Down if len > 0 => {
+                self.discover_sel = (self.discover_sel + 1).min(len - 1);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.discover_sel = self.discover_sel.saturating_sub(1);
             }
-            KeyCode::Char('h') | KeyCode::Left => {
-                if !cats.is_empty() {
-                    self.discover_cat = (self.discover_cat + cats.len() - 1) % cats.len();
-                    self.discover_sel = 0;
-                }
+            KeyCode::Char('h') | KeyCode::Left if !cats.is_empty() => {
+                self.discover_cat = (self.discover_cat + cats.len() - 1) % cats.len();
+                self.discover_sel = 0;
             }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if !cats.is_empty() {
-                    self.discover_cat = (self.discover_cat + 1) % cats.len();
-                    self.discover_sel = 0;
-                }
+            KeyCode::Char('l') | KeyCode::Right if !cats.is_empty() => {
+                self.discover_cat = (self.discover_cat + 1) % cats.len();
+                self.discover_sel = 0;
             }
             KeyCode::Enter => {
                 if let Some(b) = books.get(self.discover_sel) {
@@ -565,10 +562,8 @@ impl App {
         let results = self.search_results();
         let len = results.len();
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if len > 0 {
-                    self.search_sel = (self.search_sel + 1).min(len - 1);
-                }
+            KeyCode::Char('j') | KeyCode::Down if len > 0 => {
+                self.search_sel = (self.search_sel + 1).min(len - 1);
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.search_sel = self.search_sel.saturating_sub(1);
@@ -592,6 +587,10 @@ impl App {
     }
 
     pub(crate) fn open_reader(&mut self, book: Book) {
+        if self.live.is_some() {
+            self.open_live(&book);
+            return;
+        }
         if book.total == 0 {
             self.toast("暂无章节可预览", ToastTone::Info);
             return;
@@ -610,7 +609,9 @@ impl App {
     fn on_key_reader(&mut self, key: KeyEvent) {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             if let Some(reader) = self.reader.take() {
-                self.demo.record(reader.book.clone(), reader.chapter);
+                if self.live.is_none() {
+                    self.demo.record(reader.book.clone(), reader.chapter);
+                }
                 self.sidebar_hidden = reader.previous_sidebar_hidden;
                 if let Some(book) = self.books.iter_mut().find(|b| b.id == reader.book.id) {
                     book.read = reader.chapter;
@@ -698,7 +699,7 @@ impl App {
     pub fn shelf_groups(&self, filter: ShelfFilter) -> Vec<String> {
         let mut g = vec!["全部".to_string()];
         for b in self.shelf_base(filter) {
-            if !g.iter().any(|x| x == b.group) {
+            if !g.iter().any(|x| x == &b.group) {
                 g.push(b.group.to_string());
             }
         }
@@ -717,8 +718,8 @@ impl App {
             .filter(|b| g == "全部" || b.group == g)
             .collect();
         match self.shelf_sort {
-            1 => list.sort_by(|a, b| a.title.cmp(b.title)),
-            2 => list.sort_by(|a, b| b.new_count.cmp(&a.new_count)),
+            1 => list.sort_by(|a, b| a.title.cmp(&b.title)),
+            2 => list.sort_by_key(|b| std::cmp::Reverse(b.new_count)),
             3 => list.sort_by(|a, b| {
                 let pa = a.read as f64 / a.total.max(1) as f64;
                 let pb = b.read as f64 / b.total.max(1) as f64;
@@ -730,20 +731,30 @@ impl App {
     }
 
     pub fn discover_list(&self, source_idx: usize) -> Vec<Book> {
+        if let Some(live) = &self.live {
+            return live.discover.clone();
+        }
         let s = match self.sources.get(source_idx) {
             Some(s) => s,
             None => return vec![],
         };
-        let cat = s.categories.get(self.discover_cat).copied().unwrap_or("");
-        let mut books = data::discover_books(s.name, cat);
+        let cat = s
+            .categories
+            .get(self.discover_cat)
+            .map(String::as_str)
+            .unwrap_or("");
+        let mut books = data::discover_books(&s.name, cat);
         // 把 origin 显示名塞进 intro 前缀，绘制时用 s.name
         for b in &mut books {
-            b.origin = s.name;
+            b.origin = s.name.clone();
         }
         books
     }
 
     pub fn search_results(&self) -> Vec<&Book> {
+        if let Some(live) = &self.live {
+            return live.search.iter().collect();
+        }
         let q = self.search_query.trim();
         if q.is_empty() {
             return vec![];
@@ -780,7 +791,7 @@ mod reader_tests {
         let mut app = App::new();
         app.goto_id("shelf:all");
         app.shelf_sel = 2;
-        let id = app.shelf_list(ShelfFilter::All)[2].id;
+        let id = app.shelf_list(ShelfFilter::All)[2].id.clone();
         app.sidebar_hidden = true;
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.reader.as_ref().unwrap().book.id, id);
@@ -832,7 +843,7 @@ mod reader_tests {
         assert_eq!(app.reader.as_ref().unwrap().book.title, "三体");
         key(&mut app, KeyCode::Esc);
         app.goto_id("discover:s1");
-        let expected = app.discover_list(0)[0].title;
+        let expected = app.discover_list(0)[0].title.clone();
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.reader.as_ref().unwrap().book.title, expected);
     }
