@@ -11,6 +11,7 @@ pub enum Route {
     History,
     Sources,
     Preferences,
+    Reader,
 }
 
 impl Route {
@@ -31,6 +32,7 @@ impl Route {
             Self::History => "阅读历史",
             Self::Sources => "书源管理",
             Self::Preferences => "阅读偏好",
+            Self::Reader => "阅读",
         }
     }
 }
@@ -66,6 +68,7 @@ pub struct App {
     pub help_visible: bool,
     pub should_quit: bool,
     pub selected: usize,
+    pub main_selected: usize,
     pub notice: Option<String>,
     pub sidebar_area: Rect,
 }
@@ -79,6 +82,7 @@ impl Default for App {
             help_visible: false,
             should_quit: false,
             selected: 0,
+            main_selected: 0,
             notice: Some("Tlegado TUI 骨架已启动".to_string()),
             sidebar_area: Rect::default(),
         }
@@ -98,7 +102,14 @@ impl App {
         }
 
         match action {
-            Action::Key(KeyCode::Char('q') | KeyCode::Esc, _) => self.should_quit = true,
+            Action::Key(KeyCode::Char('q') | KeyCode::Esc, _) => {
+                if self.route == Route::Reader {
+                    self.select_route(Route::Shelf);
+                    self.focus = Focus::Main;
+                } else {
+                    self.should_quit = true;
+                }
+            }
             Action::Key(KeyCode::Char('?'), _) => self.help_visible = true,
             Action::Key(KeyCode::Char('b'), modifiers)
                 if modifiers.contains(KeyModifiers::CONTROL) =>
@@ -138,10 +149,16 @@ impl App {
             Focus::Main => match code {
                 KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
                 KeyCode::Down | KeyCode::Char('j') => {
+                    self.main_selected = self.main_selected.saturating_add(1);
                     self.notice = Some("主体区域：下一项".to_string())
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
+                    self.main_selected = self.main_selected.saturating_sub(1);
                     self.notice = Some("主体区域：上一项".to_string())
+                }
+                KeyCode::Enter if self.route == Route::Shelf => {
+                    self.route = Route::Reader;
+                    self.notice = Some("正在阅读：诡秘之主 · 第813章 雾中来客".to_string());
                 }
                 KeyCode::Enter => self.notice = Some(format!("已打开{}", self.route.title())),
                 _ => {}
@@ -154,10 +171,18 @@ impl App {
             && self.sidebar_visible
             && self.sidebar_area.contains((column, row).into())
         {
-            let index = row.saturating_sub(self.sidebar_area.y + 2) as usize;
-            if index < Route::ALL.len() {
-                self.selected = index;
-                self.select_route(Route::ALL[index]);
+            let row_offset = row.saturating_sub(self.sidebar_area.y + 1) as usize;
+            let route = match row_offset {
+                0 => Some(Route::Home),
+                2..=4 => Some(Route::Shelf),
+                6..=9 => Some(Route::Search),
+                11 => Some(Route::History),
+                12 => Some(Route::Sources),
+                13 => Some(Route::Preferences),
+                _ => None,
+            };
+            if let Some(route) = route {
+                self.select_route(route);
                 self.focus = Focus::Sidebar;
             }
         } else if matches!(kind, MouseEventKind::ScrollDown) {
