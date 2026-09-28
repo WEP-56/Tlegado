@@ -4,9 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Route};
+use crate::app::{App, Focus, HitTarget, Route, NAV_ENTRIES};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.begin_frame();
     let area = frame.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -61,23 +62,40 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let items = vec![
         nav_item(app, 0, "首页", ""),
         section_item("▾ 书架"),
         nav_item(app, 1, "全部书籍", "10"),
-        nav_item(app, 1, "本地书库", "4"),
-        nav_item(app, 1, "网络书库", "+31"),
+        nav_item(app, 2, "本地书库", "4"),
+        nav_item(app, 3, "网络书库", "+31"),
         section_item("▾ 发现"),
-        nav_item(app, 2, "搜索书籍", "/"),
-        nav_item(app, 2, "起点中文网", "7类"),
-        nav_item(app, 2, "番茄小说", "5类"),
-        nav_item(app, 2, "笔趣阁①", "6类"),
+        nav_item(app, 4, "搜索书籍", "/"),
+        nav_item(app, 5, "起点中文网", "7类"),
+        nav_item(app, 6, "番茄小说", "5类"),
+        nav_item(app, 7, "笔趣阁①", "6类"),
         section_item("▾ 设置"),
-        nav_item(app, 3, "阅读历史", "8"),
-        nav_item(app, 4, "书源管理", "6/8"),
-        nav_item(app, 5, "阅读偏好", ""),
+        nav_item(app, 8, "阅读历史", "8"),
+        nav_item(app, 9, "书源管理", "6/8"),
+        nav_item(app, 10, "阅读偏好", ""),
     ];
+    for (row, _) in NAV_ENTRIES.iter().enumerate() {
+        let offset = match row {
+            0 => 0,
+            1..=3 => 1,
+            4..=7 => 2,
+            _ => 3,
+        };
+        app.register_hit(
+            Rect::new(
+                area.x + 1,
+                area.y + 1 + (row + offset) as u16,
+                area.width.saturating_sub(2),
+                1,
+            ),
+            HitTarget::Sidebar(row),
+        );
+    }
     let border = if app.focus == Focus::Sidebar {
         Color::Rgb(227, 163, 90)
     } else {
@@ -116,7 +134,7 @@ fn section_item(label: &str) -> ListItem<'static> {
     )))
 }
 
-fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::bordered()
         .title(format!(" {} ", app.route.title()))
         .border_style(Style::default().fg(if app.focus == Focus::Main {
@@ -250,7 +268,7 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect, block: Block<'static>) {
     let _ = app;
 }
 
-fn draw_shelf(frame: &mut Frame, app: &App, area: Rect, block: Block<'static>) {
+fn draw_shelf(frame: &mut Frame, app: &mut App, area: Rect, block: Block<'static>) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let header = Row::new(["书名", "作者", "进度", "最新章节", "来源"])
@@ -302,6 +320,12 @@ fn draw_shelf(frame: &mut Frame, app: &App, area: Rect, block: Block<'static>) {
         ("三体", "刘慈欣", "37%", "第104章 尾声", "本地·EPUB"),
         ("活着", "余华", "100%", "第12章 老人与牛", "本地·TXT"),
     ];
+    for (index, _) in books.iter().enumerate() {
+        app.register_hit(
+            Rect::new(inner.x, inner.y + 2 + index as u16, inner.width, 1),
+            HitTarget::MainRow(index),
+        );
+    }
     let rows = books.iter().enumerate().map(|(i, b)| {
         Row::new([b.0, b.1, b.2, b.3, b.4]).style(if i == app.main_selected % books.len() {
             Style::default().bg(Color::Rgb(38, 38, 38)).fg(Color::White)
