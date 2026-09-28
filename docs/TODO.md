@@ -4,8 +4,8 @@
 
 ## 阶段 0：准备
 
-- [ ] 确认 Rust 工具链、Ratatui、Crossterm 和 Tokio 版本
-- [ ] 创建 TUI 二进制入口与基础模块目录
+- [x] 确认 Rust 工具链、Ratatui、Crossterm 和 Tokio 版本
+- [x] 创建 TUI 二进制入口与基础模块目录
 - [ ] 确定 UTF-8、终端颜色、Unicode 宽度和最小终端尺寸策略
 - [ ] 确定应用启动、退出和终端恢复流程
 - [ ] 建立演示数据模型：书籍、章节、书源、历史、偏好
