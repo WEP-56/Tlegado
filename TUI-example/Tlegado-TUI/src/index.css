@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #141414;
+  --color-bg2: #1b1b1b;
+  --color-bg3: #242424;
+  --color-line: #3a3a3a;
+  --color-line2: #5c5c5c;
+  --color-fg: #d4d4d4;
+  --color-hi: #f2f2f2;
+  --color-dim: #6e6e6e;
+  --color-mute: #8f8f8f;
+  --color-accent: #e3a35a;
+  --color-ok: #8cc08a;
+  --color-err: #e07a7a;
+  --color-info: #7fa9d9;
+  --color-mag: #c49ae0;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", Consolas, "Noto Sans SC", "Microsoft YaHei", monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a transparent;
+}
+
+::selection {
+  background: #e3a35a55;
+  color: #fff;
+}
+
+.cursor-blink {
+  animation: blink 1.05s steps(1) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.fade-in {
+  animation: fadein 0.18s ease-out;
+}
+@keyframes fadein {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
