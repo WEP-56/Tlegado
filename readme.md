@@ -7,6 +7,25 @@
 
 ## Licenses
 MIT
+
+## TUI 在线演示（react模拟）
+
+演示地址：https://wep-56.github.io/Tlegado/
+
+前端参考代码位于 `TUI-example/Tlegado-TUI`，使用 React + Vite，内容为本地模拟数据，尚未接入 Legado。
+
+本地运行和构建（Node.js 24）：
+
+```powershell
+cd TUI-example/Tlegado-TUI
+npm ci
+npm run dev
+# 生成 dist/index.html；本地查看构建产物可执行 npm run preview
+npm run build
+```
+
+`.github/workflows/pages.yml` 在 `master` 分支的前端目录或工作流发生变更时自动构建并部署，也可以在 GitHub Actions 中手动运行。部署仅上传前端 `dist` 目录，使用单文件构建和相对资源路径，兼容 Pages 的 `/Tlegado/` 子路径。仓库 Settings → Pages 的构建来源设为 **GitHub Actions**。Rust 构建目录、Node 依赖和前端构建产物不纳入版本控制；两个依赖锁文件继续保留。
+
 ## 阅读预览
 
 在主项目根目录执行 `cargo run`。书架、发现、搜索结果中按 `Enter` 进入阅读，首页主体中按 `c` 继续阅读。

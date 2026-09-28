@@ -1,4 +1,26 @@
-legado-example/
-TUI-example/grok-build/
+# Local reference checkouts
+/legado-example/
+/TUI-example/grok-build/
+
+# Rust build output (keep Cargo.lock)
 target/
-TUI-example\grok-build
+
+# Frontend dependencies and generated output (keep package-lock.json)
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+
+# Local environment and editor/OS files
+.env
+.env.*
+!.env.example
+!.env.*.example
+.idea/
+.DS_Store
+Thumbs.db
+
+# Browser verification artifacts
+/output/playwright/
+/.playwright-cli/

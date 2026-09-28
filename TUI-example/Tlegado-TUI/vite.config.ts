@@ -10,6 +10,8 @@ const __dirname = path.dirname(__filename);
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Relative assets work under GitHub Pages' /Tlegado/ project path.
+  base: "./",
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {
     alias: {
