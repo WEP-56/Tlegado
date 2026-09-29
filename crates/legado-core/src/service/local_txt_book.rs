@@ -215,6 +215,9 @@ impl LocalTxtBookService {
         let book_url = format!("{}:{}", LOCAL_TXT_ORIGIN, hash);
         let chapters = parse_txt_chapters(&book_url, &text);
         let book_dir = self.book_dir(user_ns, &book_url)?;
+        if let Ok(book) = self.get_book_info(user_ns, &book_url).await {
+            return Ok(book);
+        }
         fs::create_dir_all(&book_dir)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;

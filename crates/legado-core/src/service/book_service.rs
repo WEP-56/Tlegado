@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 
@@ -1327,6 +1328,28 @@ impl BookService {
         Ok(book)
     }
 
+    /// Replace a specific shelf entry in one atomic write, even if the new
+    /// source uses a different display name. Never delete the old entry first.
+    pub async fn replace_book_source(&self, user_ns: &str, previous: &Book, mut book: Book) -> Result<Book, AppError> {
+        sanitize_book_urls(&mut book);
+        if book.origin.trim().is_empty() || book.book_url.trim().is_empty() {
+            return Err(AppError::BadRequest("bookUrl and origin required".into()));
+        }
+        let _write_guard = self.bookshelf_write_lock.lock().await;
+        let mut list = self.read_bookshelf(user_ns).await?;
+        let Some(index) = list.iter().position(|b| b.book_url == previous.book_url && b.origin == previous.origin) else {
+            return Err(AppError::BadRequest("原书籍已不在书架，请重新打开后换源".into()));
+        };
+        merge_book_source_candidates(&list[index], &mut book);
+        // A URL collision with another entry must not destroy either book.
+        if list.iter().enumerate().any(|(i, b)| i != index && b.book_url == book.book_url) {
+            return Err(AppError::BadRequest("目标书籍已在书架，请从书架打开".into()));
+        }
+        list[index] = book.clone();
+        self.write_bookshelf(user_ns, &list).await?;
+        Ok(book)
+    }
+
     pub async fn save_books(&self, user_ns: &str, books: Vec<Book>) -> Result<Vec<Book>, AppError> {
         let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut normalized = Vec::with_capacity(books.len());
@@ -1650,9 +1673,17 @@ impl BookService {
                 .map_err(|e| AppError::Internal(e.into()))?;
         }
         let data = serde_json::to_string(list).map_err(|e| AppError::BadRequest(e.to_string()))?;
-        fs::write(&path, data)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let result: std::io::Result<()> = async {
+            let mut file = fs::OpenOptions::new()
+                .write(true).create_new(true).open(&temporary).await?;
+            file.write_all(data.as_bytes()).await?;
+            file.sync_all().await?;
+            drop(file);
+            fs::rename(&temporary, &path).await
+        }.await;
+        if result.is_err() { let _ = fs::remove_file(&temporary).await; }
+        result.map_err(|e| AppError::Internal(e.into()))?;
         Ok(())
     }
 
@@ -2018,7 +2049,9 @@ fn same_remote_book_identity(
     right_name: &str,
     right_author: &str,
 ) -> bool {
-    normalize_book_name(left_name) == normalize_book_name(right_name)
+    !normalize_book_name(left_name).is_empty()
+        && !normalize_book_author(left_author).is_empty()
+        && normalize_book_name(left_name) == normalize_book_name(right_name)
         && normalize_book_author(left_author) == normalize_book_author(right_author)
 }
 
@@ -2292,6 +2325,59 @@ mod tests {
         };
 
         assert!(books_match_for_save(&existing, &incoming));
+    }
+
+    #[test]
+    fn missing_author_does_not_overwrite_another_sources_book() {
+        let existing = Book {
+            name: "同名小说".into(),
+            book_url: "https://a.invalid/book".into(),
+            origin: "https://a.invalid".into(),
+            ..Default::default()
+        };
+        let incoming = Book {
+            book_url: "https://b.invalid/book".into(),
+            origin: "https://b.invalid".into(),
+            ..existing.clone()
+        };
+        assert!(!books_match_for_save(&existing, &incoming));
+        assert!(books_match_for_save(&existing, &existing));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn failed_atomic_replacement_keeps_original_bookshelf_and_cleans_temporary_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let service = BookService::new(
+            HttpClient::new(5, None).unwrap(),
+            RuleEngine::new().unwrap(),
+            FileCache::new(temp.path().join("cache")),
+            temp.path().to_str().unwrap(),
+        );
+        let original = service.save_book("default", Book {
+            name: "替换测试".into(), author: "测试作者".into(),
+            origin: "https://a.invalid".into(), book_url: "https://a.invalid/book".into(),
+            dur_chapter_index: Some(4), ..Default::default()
+        }).await.unwrap();
+        let path = service.bookshelf_path("default");
+        let before = fs::read(&path).await.unwrap();
+        // Permit reads, deny replacing the destination after the temporary file
+        // has been written, so this exercises the final commit failure.
+        let locked = std::fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+        let replacement = Book {
+            origin: "https://b.invalid".into(), book_url: "https://b.invalid/book".into(),
+            ..original.clone()
+        };
+        assert!(service.replace_book_source("default", &original, replacement.clone()).await.is_err());
+        assert_eq!(fs::read(&path).await.unwrap(), before);
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        drop(locked);
+        service.replace_book_source("default", &original, replacement).await.unwrap();
+        let books = service.get_bookshelf("default").await.unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].origin, "https://b.invalid");
+        assert_eq!(books[0].dur_chapter_index, Some(4));
     }
 
     #[test]

@@ -5,7 +5,11 @@ mod book_logo;
 mod data;
 mod demo;
 mod jobs;
+mod library;
 mod live;
+mod plugins;
+mod purify;
+mod query;
 mod reader;
 mod sources;
 mod theme;
@@ -26,15 +30,21 @@ use std::{
 
 const HELP: &str = "Tlegado — Legado 书源终端阅读器
 
-用法：tlegado [--data-dir 路径] [--import-source 文件.json] [--import-only]
+用法：tlegado [--data-dir 路径] [--import-source 文件.json] [--import-book 文件.txt/epub] [--import-only]
       tlegado --demo
 
 默认启动真实模式，无内置书源。数据保存在 ~/.tlegado，或 TLEGADO_DATA_DIR。
 --import-source 可重复指定；--import-only 导入后退出，不打开终端界面。
+--import-book 可重复指定；首页/书架 o 导入本地 TXT/EPUB（复制到数据目录）。
+--import-rules 路径/URL 导入净化 JSON；--import-layout 路径/URL 导入排版 JSON。
+净化规则页/阅读偏好页 i 导入；书架 x 确认删除本地副本或移除网络书。
+书架 m 管理分组，M 移动所选书籍；规则页 a 新建、e 编辑、x 删除、J/K 排序。
+阅读偏好和净化规则自动保存；编辑框 Tab 切换字段、Ctrl+S 保存。
 书源管理：/ 筛选、空格多选、a 全选筛选结果、Enter 启停、+/- 批量启停。
 e 探索开关、E 关闭探索、x 确认删除、i 导入、o 导出全部、v 查看 JSON。
 探索书源统一在“探索书源”列表中选择，分类页 Backspace 返回列表。
-/ 搜索；Enter 打开并自动加入书架；阅读中 [ / ] 切章，q 返回。
+/ 搜索；Enter 试读，阅读中 a 加入书架并保存当前位置；[ / ] 切章，q 返回。
+搜索/分类页 n 加载后续页，r 重试失败页；s 选择候选书源，阅读中 s 换源。
 Esc 取消后台读取；Ctrl+C 保存进度并退出。--demo 为原离线演示。
 ";
 
@@ -67,6 +77,16 @@ fn main() -> Result<()> {
                 let count = backend.import(&path).await?;
                 println!("已导入 {count} 个书源：{}", path.display());
             }
+            for path in options.local_imports {
+                let book = backend.import_local(&path).await?;
+                println!("已导入《{}》：{}", book.name, path.display());
+            }
+            for location in options.rule_imports {
+                println!("{}", backend.import_rules(&location).await?);
+            }
+            for location in options.layout_imports {
+                println!("{}", backend.import_layout(&location).await?);
+            }
             Ok(())
         });
     }
@@ -74,7 +94,17 @@ fn main() -> Result<()> {
     let bridge = if options.demo {
         None
     } else {
-        Some(jobs::Bridge::start(options.data_dir, options.imports)?)
+        let bridge = jobs::Bridge::start(options.data_dir, options.imports)?;
+        for path in options.local_imports {
+            bridge.send(jobs::Command::ImportLocal(path))?;
+        }
+        for location in options.rule_imports {
+            bridge.send(jobs::Command::ImportRules(location))?;
+        }
+        for location in options.layout_imports {
+            bridge.send(jobs::Command::ImportLayout(location))?;
+        }
+        Some(bridge)
     };
     let mut app = if options.demo {
         App::new()

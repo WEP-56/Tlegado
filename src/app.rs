@@ -216,11 +216,12 @@ impl App {
             label: "净化规则".into(),
             route: Route::Purify,
             right: self
-                .demo
-                .rules
-                .iter()
-                .filter(|r| r.enabled)
-                .count()
+                .live
+                .as_ref()
+                .map_or_else(
+                    || self.demo.rules.iter().filter(|r| r.enabled).count(),
+                    |live| live.library.rules.iter().filter(|r| r.is_enabled).count(),
+                )
                 .to_string(),
         });
         items.push(NavItem {
@@ -720,6 +721,15 @@ impl App {
 
     pub fn shelf_groups(&self, filter: ShelfFilter) -> Vec<String> {
         let mut g = vec!["全部".to_string()];
+        if let Some(live) = &self.live {
+            g.push("未分组".into());
+            g.extend(
+                live.library
+                    .groups
+                    .iter()
+                    .map(|group| group.group_name.clone()),
+            );
+        }
         for b in self.shelf_base(filter) {
             if !g.iter().any(|x| x == &b.group) {
                 g.push(b.group.to_string());

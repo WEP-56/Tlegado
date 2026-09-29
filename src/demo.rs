@@ -573,6 +573,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         Route::Purify => {
+            if app.live.is_some() {
+                crate::library::draw_rules(f, app, area);
+                return;
+            }
             let rows = app
                 .demo
                 .rules
@@ -619,19 +623,38 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         Route::Prefs => {
+            let imported = app.live.as_ref().and_then(|l| l.library.layout.as_ref());
             let rows = PREFS
                 .iter()
                 .enumerate()
                 .map(|(i, (name, options))| {
-                    format!("{} ‹{}›", pad(name, 14), options[app.demo.prefs.0[i]])
+                    let active = imported.is_some_and(|l| match i {
+                        0 => l.foreground.is_some() || l.background.is_some(),
+                        2 => l.line_gap.is_some(),
+                        3 => l.indent.is_some(),
+                        _ => false,
+                    });
+                    format!(
+                        "{} ‹{}›",
+                        pad(name, 14),
+                        if active {
+                            "导入配置"
+                        } else {
+                            options[app.demo.prefs.0[i]]
+                        }
+                    )
                 })
                 .collect();
             list(
                 f,
                 app,
                 left,
-                "阅读偏好 · 本次运行",
-                "j/k 选择  h/l 修改  R 重置",
+                if app.live.is_some() {
+                    "阅读偏好 · 自动保存 · i 导入"
+                } else {
+                    "阅读偏好 · 本次运行"
+                },
+                "j/k 选择  h/l 修改  i 导入 JSON  R 重置",
                 app.demo.pref_sel,
                 rows,
             );
@@ -643,6 +666,12 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                 false,
             );
             preview.options = app.demo.prefs.clone();
+            if let Some(live) = &app.live {
+                preview.layout = live.library.layout.clone();
+                if preview.layout.is_some() {
+                    preview.set_real(vec!["排版预览".into()], "这是导入排版的实际预览。颜色、粗体、缩进与间距已应用。\n终端间距以行为单位，字体与字号由终端控制。".repeat(12), 0);
+                }
+            }
             preview.rules = app.demo.rules.clone();
             crate::reader::draw_page(f, &mut preview, right, false);
         }

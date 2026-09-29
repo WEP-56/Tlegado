@@ -10,10 +10,16 @@ use ratatui::{
 use unicode_width::UnicodeWidthChar;
 
 pub struct Reader {
+    pub on_shelf: bool,
+    pub layout: Option<crate::plugins::Layout>,
+    pub title_rules: Vec<crate::purify::CompiledRule>,
+    pub purify_errors: Vec<String>,
+    title_cache: std::cell::RefCell<std::collections::HashMap<u32, String>>,
     pub request: Option<(u32, bool)>,
     real: Option<RealText>,
     pub options: crate::demo::Prefs,
     pub rules: Vec<crate::demo::Rule>,
+    pub live_rules: Vec<crate::purify::CompiledRule>,
     pub book: Book,
     pub chapter: u32,
     pub selected: u32,
@@ -49,10 +55,16 @@ impl Reader {
     pub fn new(book: Book, previous_sidebar_hidden: bool) -> Self {
         let chapter = book.read.min(book.total.saturating_sub(1));
         Self {
+            on_shelf: false,
+            layout: None,
+            title_rules: Vec::new(),
+            purify_errors: Vec::new(),
+            title_cache: Default::default(),
             request: None,
             real: None,
             options: crate::demo::Prefs::default(),
             rules: Vec::new(),
+            live_rules: Vec::new(),
             book,
             chapter,
             selected: chapter,
@@ -139,7 +151,30 @@ impl Reader {
             .unwrap_or_else(|| chapter_title(index))
     }
 
+    pub fn display_title(&self, index: u32) -> String {
+        if self.options.0[6] != 0 {
+            return self.title(index);
+        }
+        if let Some(title) = self.title_cache.borrow().get(&index) {
+            return title.clone();
+        }
+        let title = self.title(index);
+        let title = crate::purify::apply(&title, &self.title_rules).0;
+        self.title_cache.borrow_mut().insert(index, title.clone());
+        title
+    }
+
+    pub fn refresh_layout(&mut self) {
+        let position = self.position();
+        if let Some(real) = &mut self.real {
+            real.restore = Some(position);
+        }
+        self.title_cache.get_mut().clear();
+        self.width = 0;
+    }
+
     pub fn set_real(&mut self, titles: Vec<String>, text: String, position: usize) {
+        self.title_cache.get_mut().clear();
         self.real = Some(RealText {
             titles,
             text,
@@ -183,37 +218,65 @@ impl Reader {
             if self.width != width {
                 self.lines.clear();
                 real.positions.clear();
-                let indent = if self.options.0[3] == 1 { "　　" } else { "" };
+                let indent = self
+                    .layout
+                    .as_ref()
+                    .and_then(|l| l.indent.as_deref())
+                    .unwrap_or(if self.options.0[3] == 1 { "　　" } else { "" });
+                let line_gap = self
+                    .layout
+                    .as_ref()
+                    .and_then(|l| l.line_gap)
+                    .unwrap_or(usize::from(self.options.0[2] == 1));
+                let paragraph_gap = self
+                    .layout
+                    .as_ref()
+                    .and_then(|l| l.paragraph_gap)
+                    .unwrap_or(1);
                 let mut base = 0;
-                for paragraph in real.text.split('\n') {
+                let rules = if self.options.0[6] == 0 {
+                    self.live_rules.as_slice()
+                } else {
+                    &[]
+                };
+                let (display, mapping, errors) = crate::purify::apply_report(&real.text, rules);
+                self.purify_errors = errors;
+                for paragraph in display.split('\n') {
                     let decorated = format!("{indent}{paragraph}");
                     let wrapped = wrap(&decorated, width as usize);
                     let mut used: usize = 0;
                     for line in wrapped {
                         real.positions.push(
-                            base + used
-                                .saturating_sub(indent.chars().count())
-                                .min(paragraph.chars().count()),
+                            mapping[base
+                                + used
+                                    .saturating_sub(indent.chars().count())
+                                    .min(paragraph.chars().count())],
                         );
                         used += line.chars().count();
                         self.lines.push(line);
-                        if self.options.0[2] == 1 {
+                        for _ in 0..line_gap {
                             real.positions.push(
-                                base + used
-                                    .saturating_sub(indent.chars().count())
-                                    .min(paragraph.chars().count()),
+                                mapping[base
+                                    + used
+                                        .saturating_sub(indent.chars().count())
+                                        .min(paragraph.chars().count())],
                             );
                             self.lines.push(String::new());
                         }
                     }
-                    real.positions.push(base + paragraph.chars().count());
-                    self.lines.push(String::new());
+                    for _ in 0..paragraph_gap {
+                        real.positions
+                            .push(mapping[base + paragraph.chars().count()]);
+                        self.lines.push(String::new());
+                    }
                     base += paragraph.chars().count() + 1;
                 }
-                self.offset = real
-                    .positions
-                    .partition_point(|p| *p <= position)
-                    .saturating_sub(1);
+                let next = real.positions.partition_point(|p| *p < position);
+                self.offset = if real.positions.get(next) == Some(&position) {
+                    next
+                } else {
+                    next.saturating_sub(1)
+                };
                 real.restore = None;
                 self.width = width;
             }
@@ -373,7 +436,7 @@ pub fn draw_chapters(f: &mut Frame, reader: &Reader, area: Rect, focused: bool) 
         let title = format!(
             "{}{}",
             if current { "● " } else { "  " },
-            reader.title(index as u32)
+            reader.display_title(index as u32)
         );
         let line = row_line(
             index as u32 == reader.selected,
@@ -426,7 +489,7 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
     let content = Rect::new(x, inner.y + 3, width, inner.height - 5);
     reader.prepare(content.width, content.height);
     f.render_widget(
-        Paragraph::new(reader.title(reader.chapter))
+        Paragraph::new(reader.display_title(reader.chapter))
             .style(sb(THEME.hi))
             .centered(),
         Rect::new(x, inner.y + 1, width, 1),
@@ -439,16 +502,25 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
         .map(|line| Line::from(line.as_str()))
         .collect();
     use ratatui::style::{Color, Style};
-    let (bg, fg) = match reader.options.0[0] {
+    let (mut bg, mut fg) = match reader.options.0[0] {
         1 => (Color::Rgb(20, 32, 25), Color::Rgb(188, 217, 180)),
         2 => (Color::Rgb(232, 220, 194), Color::Rgb(58, 47, 34)),
         3 => (Color::Black, Color::White),
         _ => (THEME.bg, THEME.fg),
     };
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(fg).bg(bg)),
-        content,
-    );
+    let mut style = Style::default();
+    if let Some(layout) = &reader.layout {
+        if let Some([r, g, b]) = layout.foreground {
+            fg = Color::Rgb(r, g, b);
+        }
+        if let Some([r, g, b]) = layout.background {
+            bg = Color::Rgb(r, g, b);
+        }
+        if layout.bold {
+            style = style.add_modifier(ratatui::style::Modifier::BOLD);
+        }
+    }
+    f.render_widget(Paragraph::new(lines).style(style.fg(fg).bg(bg)), content);
     if reader.options.0[5] == 1 {
         return;
     }
@@ -460,7 +532,11 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
         reader.book.total,
         page,
         pages,
-        if reader.is_real() {
+        if !reader.purify_errors.is_empty() {
+            "部分净化规则失败/超限，保留原文"
+        } else if reader.is_real() && !reader.on_shelf {
+            "试读 · a 加入书架后保存进度"
+        } else if reader.is_real() {
             "进度自动保存"
         } else {
             "演示正文"
@@ -549,5 +625,100 @@ mod paging_tests {
         reader.page(true);
         reader.page(false);
         assert_eq!(reader.chapter, 1);
+    }
+}
+
+#[cfg(test)]
+mod purification_tests {
+    use super::*;
+    use reader_core::model::replace_rule::ReplaceRule;
+
+    #[test]
+    fn imported_layout_renders_colors_indent_and_keeps_raw_titles() {
+        use ratatui::{
+            backend::TestBackend,
+            style::{Color, Modifier},
+            Terminal,
+        };
+        let mut reader = Reader::new(crate::data::shelf().remove(0), false);
+        reader.chapter = 0;
+        reader.layout = Some(crate::plugins::parse_layout(r##"{"bgStr":"#ffded9c5","textColor":"#ff5b4928","textBold":1,"paragraphIndent":"--","lineSpacingExtra":0,"paragraphSpacing":0}"##).unwrap());
+        reader.title_rules = vec![crate::purify::CompiledRule::new(&ReplaceRule {
+            name: "标题去广告".into(),
+            pattern: "广告".into(),
+            scope_title: true,
+            ..Default::default()
+        })
+        .unwrap()];
+        reader.set_real(vec!["广告第一章".into()], "中文正文。".repeat(100), 0);
+        assert_eq!(reader.title(0), "广告第一章");
+        assert_eq!(reader.display_title(0), "第一章");
+        for (w, h) in [(120, 40), (80, 24), (40, 12), (2, 2)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal
+                .draw(|frame| draw_page(frame, &mut reader, frame.area(), true))
+                .unwrap();
+            if w == 120 {
+                assert!(reader.lines[0].starts_with("--"));
+                assert!(reader.lines.iter().all(|line| !line.is_empty()));
+                assert!(terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .any(|cell| cell.fg == Color::Rgb(91, 73, 40)
+                        && cell.bg == Color::Rgb(222, 217, 197)
+                        && cell.modifier.contains(Modifier::BOLD)));
+            }
+        }
+        reader.page(true);
+        let position = reader.position();
+        reader.refresh_layout();
+        assert_eq!(reader.position(), position);
+    }
+
+    #[test]
+    fn purified_pages_restore_original_offsets_when_rules_are_disabled_or_width_changes() {
+        let mut reader = Reader::new(crate::data::shelf().remove(0), false);
+        reader.options.0[3] = 0;
+        reader.live_rules = vec![crate::purify::CompiledRule::new(&ReplaceRule {
+            name: "广告".into(),
+            pattern: "广告".into(),
+            replacement: String::new(),
+            is_enabled: true,
+            ..Default::default()
+        })
+        .unwrap()];
+        let raw = "广告中文😀正文内容，下一段的文字。".repeat(100);
+        reader.set_real(vec!["真实章节".into()], raw.clone(), 0);
+        reader.prepare(20, 5);
+        assert!(!reader.lines.join("").contains("广告"));
+        reader.page(true);
+        let position = reader.position();
+        assert!(position > 0);
+        reader.set_real(vec!["真实章节".into()], raw, position);
+        reader.options.0[6] = 1;
+        reader.prepare(34, 5);
+        assert!(reader.lines.join("").contains("广告"));
+        assert!(reader.position() <= position && position - reader.position() < 34);
+    }
+
+    #[test]
+    fn replacement_expansion_at_start_does_not_skip_first_displayed_lines() {
+        let mut reader = Reader::new(crate::data::shelf().remove(0), false);
+        reader.options.0[3] = 0;
+        reader.live_rules = vec![crate::purify::CompiledRule::new(&ReplaceRule {
+            name: "扩展".into(),
+            pattern: "头".into(),
+            replacement: "第一行第二行第三行第四行".into(),
+            is_enabled: true,
+            ..Default::default()
+        })
+        .unwrap()];
+        reader.set_real(vec!["正文".into()], "头后续正文".into(), 0);
+        reader.prepare(6, 2);
+        assert_eq!(reader.offset, 0);
+        assert!(reader.lines[0].starts_with("第一行"));
+        assert_eq!(reader.position(), 0);
     }
 }

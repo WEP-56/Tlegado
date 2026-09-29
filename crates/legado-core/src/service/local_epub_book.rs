@@ -120,6 +120,11 @@ impl LocalEpubBookService {
         let book_url = format!("{}:{}", LOCAL_EPUB_ORIGIN, hash);
         let book_dir = self.book_dir(user_ns, &book_url)?;
 
+        // A completed content-addressed import is immutable. Reuse it so a
+        // concurrent reader cannot observe deleted chapter files on re-import.
+        if let Ok(book) = self.get_book_info(user_ns, &book_url).await {
+            return Ok(book);
+        }
         if book_dir.exists() {
             fs::remove_dir_all(&book_dir)
                 .await

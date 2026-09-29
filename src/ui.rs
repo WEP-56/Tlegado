@@ -41,12 +41,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if crate::sources::draw_confirmation(f, app, area) {
         return;
     }
+    if crate::library::draw_modal(f, app, area) {
+        return;
+    }
+    if app.live.as_ref().is_some_and(|l| l.picker.is_some()) {
+        draw_source_picker(f, app, area);
+        return;
+    }
 
     if let Some(input) = app.live.as_ref().and_then(|l| l.prompt.as_ref()) {
         let rect = center_rect(area, 76, 8);
         ratatui::widgets::Clear.render(rect, f.buffer_mut());
         let title = match input.kind {
+            crate::live::InputKind::Rules => "导入净化规则 JSON（文件或 HTTP(S) URL）",
+            crate::live::InputKind::Layout => "导入排版 JSON（文件或 HTTP(S) URL）",
             crate::live::InputKind::Import => "导入 Legado JSON",
+            crate::live::InputKind::LocalBook => "导入本地 TXT / EPUB",
             crate::live::InputKind::Export => "导出书源（新文件）",
         };
         let block = panel(vec![Span::styled(title, sb(THEME.mag))], None, true);
@@ -72,9 +82,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         {
             crate::sources::draw_help(f, area);
         } else if app.reader.is_some() {
-            draw_reader_help(f, area);
+            draw_reader_help(f, area, app.live.is_some());
         } else {
-            draw_help(f, area);
+            draw_help(f, area, app.live.is_some());
         }
     }
 }
@@ -85,6 +95,74 @@ fn inset(r: Rect, x: u16, y: u16) -> Rect {
         y: r.y + y,
         width: r.width.saturating_sub(x * 2),
         height: r.height.saturating_sub(y * 2),
+    }
+}
+
+fn draw_source_picker(f: &mut Frame, app: &App, area: Rect) {
+    let live = app.live.as_ref().unwrap();
+    let picker = live.picker.as_ref().unwrap();
+    let rect = center_rect(area, 88, 22);
+    ratatui::widgets::Clear.render(rect, f.buffer_mut());
+    let block = panel_full(
+        vec![Span::styled(
+            format!(
+                "书源 · {} · {} 个候选",
+                picker.target.name,
+                picker.candidates.len()
+            ),
+            sb(THEME.hi),
+        )],
+        None,
+        Some(Span::styled(
+            "j/k 选择 · Enter 试读/换源 · n 续页 · r 重试 · Esc 取消",
+            s(THEME.dim),
+        )),
+        true,
+    );
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
+    f.render_widget(
+        Paragraph::new(live.status.as_str())
+            .style(s(THEME.info))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        rows[0],
+    );
+    let scroll = list_scroll(
+        picker.selected,
+        rows[1].height as usize,
+        picker.candidates.len(),
+    );
+    for (i, book) in picker
+        .candidates
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(rows[1].height as usize)
+    {
+        let selected = i == picker.selected;
+        let current = crate::live::book_id(book) == crate::live::book_id(&picker.target);
+        let name = book.origin_name.as_deref().unwrap_or(&book.origin);
+        let content = vec![
+            Span::styled(if current { "● " } else { "  " }, s(THEME.ok)),
+            Span::styled(
+                format!(
+                    "{}  {}",
+                    name,
+                    book.latest_chapter_title.as_deref().unwrap_or_default()
+                ),
+                if selected { sb(THEME.hi) } else { s(THEME.fg) },
+            ),
+        ];
+        f.render_widget(
+            Paragraph::new(row_line(selected, true, content)),
+            Rect {
+                x: rows[1].x,
+                y: rows[1].y + (i - scroll) as u16,
+                width: rows[1].width,
+                height: 1,
+            },
+        );
     }
 }
 
@@ -183,6 +261,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("tab", "目录"),
             ("j/k", "滚动"),
             ("space", "翻页"),
+            ("s", "换源"),
+            ("a", "加入书架"),
             ("q", "返回"),
             ("?", "帮助"),
         ])
@@ -421,7 +501,7 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
         ("搜索书籍", "/"),
         (
             if app.live.is_some() {
-                "本地书籍（待接入）"
+                "导入本地 TXT / EPUB"
             } else {
                 "导入本地书籍"
             },
@@ -460,43 +540,6 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-#[cfg(test)]
-mod home_layout_tests {
-    use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
-
-    fn has_braille(terminal: &Terminal<TestBackend>) -> bool {
-        terminal.backend().buffer().content.iter().any(|cell| {
-            cell.symbol()
-                .chars()
-                .next()
-                .is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
-        })
-    }
-
-    #[test]
-    fn home_logo_has_a_separate_wide_column_and_is_hidden_when_narrow() {
-        for (width, expected_logo) in [(80, false), (140, true)] {
-            let mut app = App::new();
-            app.focus = Focus::Main;
-            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
-            terminal
-                .draw(|frame| draw_home(frame, &mut app, frame.area()))
-                .unwrap();
-            assert_eq!(has_braille(&terminal), expected_logo, "width={width}");
-            let text = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|c| c.symbol())
-                .collect::<String>();
-            assert!(text.contains("基于 legado"));
-            assert!(text.contains("快捷键帮助"));
-        }
-    }
-}
-
 // ── 书架 ────────────────────────────────────────────────────
 fn draw_shelf(f: &mut Frame, app: &App, area: Rect, filter: ShelfFilter) {
     let focused = app.focus == Focus::Main;
@@ -522,7 +565,11 @@ fn draw_shelf(f: &mut Frame, app: &App, area: Rect, filter: ShelfFilter) {
         ],
         Some(Span::styled(format!("{} 本", list.len()), s(THEME.dim))),
         Some(Span::styled(
-            "enter 阅读  h/l 分组  s 排序  r 更新  x 移出",
+            if app.live.is_some() {
+                "Enter 阅读  o 导入  x 删除/移除  m 分组  M 移动分组"
+            } else {
+                "enter 阅读  h/l 分组  s 排序  r 更新  x 移出"
+            },
             s(THEME.dim),
         )),
         focused,
@@ -723,7 +770,11 @@ fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
             s(THEME.dim),
         )),
         Some(Span::styled(
-            "enter 试读  a 加入书架  h/l 分类  j/k 移动",
+            if app.live.is_some() {
+                "enter 试读  a 加入  h/l 分类  n 续页  r 重试  s 书源"
+            } else {
+                "enter 试读  a 加入书架  h/l 分类  j/k 移动"
+            },
             s(THEME.dim),
         )),
         focused,
@@ -830,7 +881,11 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
             s(THEME.dim),
         )),
         Some(Span::styled(
-            "enter 试读  a 加入  i 输入  j/k 移动",
+            if app.live.is_some() {
+                "enter 试读  a 加入  i 输入  n 续页  r 重试  s 书源"
+            } else {
+                "enter 试读  a 加入  i 输入  j/k 移动"
+            },
             s(THEME.dim),
         )),
         focused,
@@ -938,8 +993,8 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // ── 帮助浮层 ────────────────────────────────────────────────
-fn draw_help(f: &mut Frame, area: Rect) {
-    let r = center_rect(area, 72, 22);
+fn draw_help(f: &mut Frame, area: Rect, live: bool) {
+    let r = center_rect(area, 76, 24);
     // 清出一块 + 铺底
     ratatui::widgets::Clear.render(r, f.buffer_mut());
     fill_bg(r, f.buffer_mut());
@@ -975,29 +1030,50 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ),
         (
             "书架",
-            &[("s", "切换排序"), ("r", "检查更新"), ("x", "移出书架")],
+            if live {
+                &[
+                    ("s", "切换排序"),
+                    ("x", "移出书架"),
+                    ("o", "导入本地书"),
+                    ("m/M", "管理/移动分组"),
+                ]
+            } else {
+                &[("s", "切换排序"), ("r", "检查更新"), ("x", "移出书架")]
+            },
         ),
         (
             "发现/搜索",
-            &[("a", "加入书架"), ("i", "聚焦输入"), ("h l", "切换分类")],
+            if live {
+                &[
+                    ("a", "加入书架"),
+                    ("i", "聚焦输入"),
+                    ("h l", "切换分类"),
+                    ("n", "加载后续页"),
+                    ("r", "重试失败页"),
+                    ("s", "选择书源"),
+                ]
+            } else {
+                &[("a", "加入书架"), ("i", "聚焦输入"), ("h l", "切换分类")]
+            },
         ),
     ];
 
     let mut lines = Vec::new();
     for (g, items) in groups {
         lines.push(Line::from(Span::styled(format!("── {g}"), s(THEME.dim))));
-        for (k, d) in *items {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {d:12}"), s(THEME.fg)),
-                Span::styled((*k).to_string(), s(THEME.accent)),
-            ]));
+        for pair in items.chunks(2) {
+            let mut spans = Vec::new();
+            for (k, d) in pair {
+                spans.push(Span::styled(format!("  {k} "), s(THEME.accent)));
+                spans.push(Span::styled(format!("{d}  "), s(THEME.fg)));
+            }
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(""));
     }
     f.render_widget(Paragraph::new(lines), inset(inner, 2, 1));
 }
 
-fn draw_reader_help(f: &mut Frame, area: Rect) {
+fn draw_reader_help(f: &mut Frame, area: Rect, live: bool) {
     let r = center_rect(area, 68, 19);
     ratatui::widgets::Clear.render(r, f.buffer_mut());
     let block = panel(
@@ -1015,10 +1091,16 @@ fn draw_reader_help(f: &mut Frame, area: Rect) {
         "[ / ]     上一章 / 下一章",
         "g / G     目录首尾 / 正文首尾",
         "t         聚焦当前章节目录",
+        "s         选择其他书源（真实模式）",
+        "a         将当前网络书加入书架并保存当前位置",
         "Ctrl+B    显示 / 隐藏章节目录",
         "q / Esc   返回进入阅读前的页面",
         "",
-        "预览使用演示正文；章节进度仅保留在本次运行中。",
+        if live {
+            "书架内图书自动保存进度；试读须按 a 加入。换源从匹配章节章首阅读。"
+        } else {
+            "预览使用演示正文；章节进度仅保留在本次运行中。"
+        },
     ];
     f.render_widget(
         Paragraph::new(
@@ -1030,4 +1112,43 @@ fn draw_reader_help(f: &mut Frame, area: Rect) {
         .style(s(THEME.fg)),
         inset(inner, 1, 1),
     );
+}
+
+#[cfg(test)]
+mod home_layout_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn has_braille(terminal: &Terminal<TestBackend>) -> bool {
+        terminal.backend().buffer().content.iter().any(|cell| {
+            cell.symbol()
+                .chars()
+                .next()
+                .is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+        })
+    }
+
+    #[test]
+    fn home_logo_has_a_separate_wide_column_and_is_hidden_when_narrow() {
+        for (width, expected_logo) in [(80, false), (140, true)] {
+            let mut app = App::new();
+            app.focus = Focus::Main;
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            terminal
+                .draw(|frame| draw_home(frame, &app, frame.area()))
+                .unwrap();
+            assert_eq!(has_braille(&terminal), expected_logo, "width={width}");
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            // Wide characters have blank continuation cells in TestBackend.
+            let text = text.replace(' ', "");
+            assert!(text.contains("基于legado"));
+            assert!(text.contains("快捷键帮助"));
+        }
+    }
 }
