@@ -86,7 +86,7 @@ jobs:
         with:
           pattern: binary-*
           path: dist/binaries
-          merge-multiple: true
+          merge-multiple: false
       - name: Arrange native binaries
         shell: bash
         run: |
