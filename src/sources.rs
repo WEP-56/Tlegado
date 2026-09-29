@@ -188,6 +188,28 @@ impl App {
                             .all(|s| if is_explore { s.explore } else { s.enabled }),
                     };
                     self.cancel_live_reads();
+                    // Keep the navigation tree in sync immediately. The
+                    // persisted snapshot arrives asynchronously, so without
+                    // this optimistic selection a newly enabled source only
+                    // appears after a later reload/import.
+                    if is_explore {
+                        for source in &mut self.sources {
+                            if keys.iter().any(|key| key == &source.id) {
+                                source.explore = enabled;
+                            }
+                        }
+                        if enabled {
+                            self.source_browser.active_explore = keys.first().cloned();
+                        } else if self
+                            .source_browser
+                            .active_explore
+                            .as_ref()
+                            .is_some_and(|active| keys.iter().any(|key| key == active))
+                        {
+                            self.source_browser.active_explore = None;
+                        }
+                        self.rebuild_nav();
+                    }
                     self.commands.push(Command::SetSources {
                         keys,
                         explore: is_explore,
@@ -492,6 +514,23 @@ mod tests {
         assert!(
             matches!(app.commands.last(), Some(Command::DeleteSources(keys)) if keys.len() == 10)
         );
+    }
+
+    #[test]
+    fn enabling_explore_updates_sidebar_before_snapshot_returns() {
+        let mut app = fixture(2);
+        app.sources[0].explore = false;
+        app.rebuild_nav();
+        key(&mut app, KeyCode::Char('e'));
+        assert_eq!(
+            app.source_browser.active_explore.as_deref(),
+            Some(app.sources[0].id.as_str())
+        );
+        assert!(app.sources[0].explore);
+        assert!(app
+            .nav
+            .iter()
+            .any(|item| item.id == format!("discover:{}", app.sources[0].id)));
     }
 
     #[test]

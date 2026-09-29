@@ -223,6 +223,13 @@ impl App {
                         }
                         KeyCode::Char('e') => {
                             source.explore = !source.explore;
+                            if source.explore {
+                                self.source_browser.active_explore = Some(source.id.clone());
+                            } else if self.source_browser.active_explore.as_deref()
+                                == Some(source.id.as_str())
+                            {
+                                self.source_browser.active_explore = None;
+                            }
                             self.rebuild_nav();
                         }
                         KeyCode::Char('t') => self.demo.checks[i] = Check::Running(8),
