@@ -85,5 +85,8 @@ cargo run -- --data-dir "E:\Reader Data" --import-book "C:\Books\小说.epub" --
 ## 致谢
 本项目的rust legado3.0实现参考了：[Reader](https://github.com/hadc188/Reader)
 
+## Linux Do
+学AI，上[L站](https://linux.do/)
+
 ## Licenses
 MIT
