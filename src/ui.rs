@@ -6,7 +6,7 @@
 //!   底栏  →  快捷键提示 / toast           [alpha]
 
 use crate::app::{App, Focus, Route, ShelfFilter, ToastTone};
-use crate::data::Kind;
+use crate::data::{Book, Kind};
 use crate::theme::{
     self, bar_spans, center_rect, fill_bg, hints, list_scroll, pad, panel, panel_full, row_line, s,
     sb, sbg, truncate, THEME,
@@ -17,6 +17,7 @@ use ratatui::{
     widgets::{Paragraph, Widget},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -783,11 +784,31 @@ fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
     f.render_widget(block, cols[0]);
 
     // tabs
+    // Keep the selected category in view when a source exposes many tabs.
+    let tab_width = inner.width as usize;
+    let mut tab_start = 0usize;
+    let mut used = 0usize;
+    for i in (0..cats.len().min(app.discover_cat + 1)).rev() {
+        let w = UnicodeWidthStr::width(format!(" {} ", cats[i]).as_str());
+        if used + w > tab_width.saturating_sub(2) && i < app.discover_cat {
+            break;
+        }
+        used += w;
+        tab_start = i;
+    }
     let mut tab_spans = Vec::new();
-    for (i, c) in cats.iter().enumerate() {
+    if tab_start > 0 {
+        tab_spans.push(Span::styled("… ", s(THEME.dim)));
+    }
+    used = if tab_start > 0 { 2 } else { 0 };
+    for (i, c) in cats.iter().enumerate().skip(tab_start) {
+        let label = format!(" {} ", c);
+        if i != app.discover_cat && UnicodeWidthStr::width(label.as_str()) + used > tab_width {
+            break;
+        }
         if i == app.discover_cat {
             tab_spans.push(Span::styled(
-                format!("[{c}]"),
+                format!("[{}]", truncate(c, tab_width.saturating_sub(used + 2))),
                 if focused {
                     s(THEME.accent)
                 } else {
@@ -797,6 +818,7 @@ fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
         } else {
             tab_spans.push(Span::styled(format!(" {c} "), s(THEME.dim)));
         }
+        used += UnicodeWidthStr::width(label.as_str());
     }
     let header = Line::from(vec![
         Span::styled("  ", s(THEME.dim)),
@@ -956,14 +978,81 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
+    let selected_origin = results
+        .get(app.search_sel.min(results.len().saturating_sub(1)))
+        .map(|b| b.origin.as_str());
+    let mut groups: Vec<(&str, Vec<(usize, &Book)>)> = Vec::new();
+    for (index, book) in results.iter().enumerate() {
+        let origin = book.origin.as_str();
+        if let Some((_, items)) = groups.iter_mut().find(|(name, _)| *name == origin) {
+            items.push((index, *book));
+        } else {
+            groups.push((origin, vec![(index, *book)]));
+        }
+    }
+    let mut rows: Vec<(bool, usize, &Book)> = Vec::new();
+    for (origin, items) in groups {
+        rows.push((
+            true,
+            items.first().map(|(i, _)| *i).unwrap_or(0),
+            items[0].1,
+        ));
+        if app.search_expanded && Some(origin) == selected_origin {
+            rows.extend(items.into_iter().map(|(i, b)| (false, i, b)));
+        }
+    }
+    let selected_row = rows
+        .iter()
+        .position(|(header, i, _)| {
+            if app.search_expanded {
+                !*header && *i == app.search_sel
+            } else {
+                *header && *i == app.search_sel
+            }
+        })
+        .unwrap_or(0);
     let h = list_area.height as usize;
-    let scroll = list_scroll(app.search_sel, h, results.len());
-    for (i, b) in results.iter().enumerate().skip(scroll) {
-        let y = (i - scroll) as u16;
+    let scroll = list_scroll(selected_row, h, rows.len());
+    for (row, (header, i, b)) in rows.iter().enumerate().skip(scroll) {
+        let y = (row - scroll) as u16;
         if y >= list_area.height {
             break;
         }
-        let sel = i == app.search_sel;
+        if *header {
+            let selected = Some(b.origin.as_str()) == selected_origin;
+            let expanded = selected && app.search_expanded;
+            let line = Line::from(vec![
+                Span::styled(
+                    if expanded {
+                        "▾ "
+                    } else if selected {
+                        "› "
+                    } else {
+                        "▸ "
+                    },
+                    s(THEME.accent),
+                ),
+                Span::styled(
+                    format!(
+                        "{}  ({} 个结果)",
+                        b.origin,
+                        results.iter().filter(|x| x.origin == b.origin).count()
+                    ),
+                    sb(THEME.hi),
+                ),
+            ]);
+            f.render_widget(
+                Paragraph::new(line),
+                Rect {
+                    x: list_area.x,
+                    y: list_area.y + y,
+                    width: list_area.width,
+                    height: 1,
+                },
+            );
+            continue;
+        }
+        let sel = *i == app.search_sel;
         let content = vec![
             Span::styled(
                 pad(&b.title, 16),

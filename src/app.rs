@@ -61,6 +61,7 @@ pub struct App {
     pub discover_cat: usize,
     pub discover_sel: usize,
     pub search_sel: usize,
+    pub search_expanded: bool,
     pub search_query: String,
     pub search_input_mode: bool, // true = 正在输入
 
@@ -100,6 +101,7 @@ impl App {
             discover_cat: 0,
             discover_sel: 0,
             search_sel: 0,
+            search_expanded: false,
             search_query: String::new(),
             search_input_mode: false,
             help: false,
@@ -342,6 +344,7 @@ impl App {
                             ToastTone::Info,
                         );
                         self.search_sel = 0;
+                        self.search_expanded = false;
                     }
                 }
                 KeyCode::Backspace => {
@@ -583,26 +586,74 @@ impl App {
 
     fn on_key_search(&mut self, key: KeyEvent) {
         let results = self.search_results();
-        let len = results.len();
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down if len > 0 => {
-                self.search_sel = (self.search_sel + 1).min(len - 1);
+        let selected_book = results.get(self.search_sel).map(|b| (*b).clone());
+        let current_origin = results.get(self.search_sel).map(|b| b.origin.clone());
+        let mut source_first = Vec::new();
+        let mut seen_sources = std::collections::HashSet::new();
+        for (index, book) in results.iter().enumerate() {
+            if seen_sources.insert(book.origin.clone()) {
+                source_first.push((index, book.origin.clone()));
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.search_sel = self.search_sel.saturating_sub(1);
+        }
+        let source_pos = source_first
+            .iter()
+            .position(|(_, origin)| Some(origin) == current_origin.as_ref())
+            .unwrap_or(0);
+        let group: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(index, book)| {
+                (Some(&book.origin) == current_origin.as_ref()).then_some(index)
+            })
+            .collect();
+        let group_pos = group
+            .iter()
+            .position(|index| *index == self.search_sel)
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down
+                if !self.search_expanded && !source_first.is_empty() =>
+            {
+                self.search_sel = source_first[(source_pos + 1).min(source_first.len() - 1)].0;
+            }
+            KeyCode::Char('k') | KeyCode::Up
+                if !self.search_expanded && !source_first.is_empty() =>
+            {
+                self.search_sel = source_first[source_pos.saturating_sub(1)].0;
+            }
+            KeyCode::Char('j') | KeyCode::Down if self.search_expanded && !group.is_empty() => {
+                self.search_sel = group[(group_pos + 1).min(group.len() - 1)];
+            }
+            KeyCode::Char('k') | KeyCode::Up if self.search_expanded && !group.is_empty() => {
+                self.search_sel = group[group_pos.saturating_sub(1)];
             }
             KeyCode::Char('i') | KeyCode::Char('/') => {
                 self.search_input_mode = true;
             }
-            KeyCode::Enter => {
-                if let Some(b) = results.get(self.search_sel) {
-                    self.open_reader((*b).clone());
+            KeyCode::Enter if !self.search_expanded => {
+                self.search_expanded = !source_first.is_empty();
+                if self.live.is_none() && source_first.len() == 1 {
+                    if let Some(b) = selected_book.clone() {
+                        self.open_reader(b);
+                    }
                 }
             }
-            KeyCode::Char('a') => {
-                if let Some(b) = results.get(self.search_sel) {
-                    self.add_demo_book((*b).clone());
+            KeyCode::Enter if self.search_expanded => {
+                if let Some(b) = selected_book.clone() {
+                    self.open_reader(b);
                 }
+            }
+            KeyCode::Char('a') if self.search_expanded => {
+                if let Some(b) = selected_book {
+                    self.add_demo_book(b);
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Esc if self.search_expanded => {
+                self.search_expanded = false;
+                self.search_sel = source_first
+                    .get(source_pos)
+                    .map(|(index, _)| *index)
+                    .unwrap_or(0);
             }
             KeyCode::Char('q') | KeyCode::Esc => self.focus = Focus::Sidebar,
             _ => {}
