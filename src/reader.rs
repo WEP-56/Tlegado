@@ -475,7 +475,7 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
     );
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if inner.width < 4 || inner.height < 5 {
+    if inner.width < 4 || inner.height < 3 {
         return;
     }
     let limit = match reader.options.0[1] {
@@ -486,13 +486,23 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
     };
     let width = inner.width.saturating_sub(4).min(limit);
     let x = inner.x + (inner.width - width) / 2;
-    let content = Rect::new(x, inner.y + 3, width, inner.height - 5);
+    // The first and last inner rows are compact navigation chrome.  Keeping
+    // them to one row leaves substantially more room for the actual text.
+    let content = Rect::new(x, inner.y + 1, width, inner.height.saturating_sub(2));
     reader.prepare(content.width, content.height);
+    let chapter_title = truncate(&reader.display_title(reader.chapter), width as usize);
+    let top = if reader.offset == 0 {
+        format!("╭─ 第 {}  {} ─╮", reader.chapter + 1, chapter_title)
+    } else {
+        format!("· {}", chapter_title)
+    };
     f.render_widget(
-        Paragraph::new(reader.display_title(reader.chapter))
-            .style(sb(THEME.hi))
-            .centered(),
-        Rect::new(x, inner.y + 1, width, 1),
+        Paragraph::new(top).style(if reader.offset == 0 {
+            sb(THEME.hi)
+        } else {
+            s(THEME.dim)
+        }),
+        Rect::new(x, inner.y, width, 1),
     );
     let lines: Vec<Line> = reader
         .lines
@@ -521,29 +531,53 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
         }
     }
     f.render_widget(Paragraph::new(lines).style(style.fg(fg).bg(bg)), content);
-    if reader.options.0[5] == 1 {
-        return;
-    }
     let page = (reader.offset + reader.height).div_ceil(reader.height);
     let pages = reader.lines.len().div_ceil(reader.height).max(1);
-    let status = format!(
-        "第 {}/{} 章 · {}/{} 页 · {}",
-        reader.chapter + 1,
-        reader.book.total,
-        page,
-        pages,
-        if !reader.purify_errors.is_empty() {
-            "部分净化规则失败/超限，保留原文"
-        } else if reader.is_real() && !reader.on_shelf {
-            "试读 · a 加入书架后保存进度"
-        } else if reader.is_real() {
-            "进度自动保存"
+    let at_end = reader.offset == reader.max_offset();
+    // The preference hides routine page progress, while chapter boundaries
+    // remain visible so automatic chapter changes are never ambiguous.
+    if reader.options.0[5] == 1 && !at_end {
+        return;
+    }
+    let status = if at_end {
+        if reader.chapter + 1 < reader.book.total {
+            format!(
+                "╰─ 本章完 · ] 下一章 · 第 {}/{} ─╯",
+                reader.chapter + 1,
+                reader.book.total
+            )
         } else {
-            "演示正文"
+            format!(
+                "╰─ 全书完 · 第 {}/{} ─╯",
+                reader.chapter + 1,
+                reader.book.total
+            )
         }
-    );
+    } else if !reader.purify_errors.is_empty() {
+        format!(
+            "第 {}/{} · {}/{} 页 · 净化失败，保留原文",
+            reader.chapter + 1,
+            reader.book.total,
+            page,
+            pages
+        )
+    } else {
+        format!(
+            "第 {}/{} · {}/{} 页",
+            reader.chapter + 1,
+            reader.book.total,
+            page,
+            pages
+        )
+    };
     f.render_widget(
-        Paragraph::new(status).style(s(THEME.dim)).centered(),
+        Paragraph::new(status)
+            .style(if at_end {
+                sb(THEME.accent)
+            } else {
+                s(THEME.dim)
+            })
+            .centered(),
         Rect::new(x, inner.bottom() - 1, width, 1),
     );
 }
