@@ -1,6 +1,6 @@
 [package]
 name = "tlegado"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Tlegado — 支持 Legado 书源的终端阅读器"
 

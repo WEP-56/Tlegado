@@ -188,7 +188,7 @@ fn draw_topbar(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(app.crumb(), s(THEME.fg)),
     ]);
     let right = if area.width >= 70 {
-        format!("{focus_label} · Tlegado 0.1.0")
+        format!("{focus_label} · Tlegado {}", env!("CARGO_PKG_VERSION"))
     } else {
         String::new()
     };
@@ -431,7 +431,7 @@ fn draw_home(f: &mut Frame, app: &App, area: Rect) {
     let block = panel(
         vec![
             Span::styled("Tlegado ", sb(THEME.hi)),
-            Span::styled("0.1.0-alpha", s(THEME.dim)),
+            Span::styled(env!("CARGO_PKG_VERSION"), s(THEME.dim)),
         ],
         None,
         focused,
