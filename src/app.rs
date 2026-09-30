@@ -172,20 +172,19 @@ impl App {
         items.push(NavItem {
             id: "discover:sources".into(),
             section: Some("发现"),
-            label: "探索书源".into(),
+            label: "发现书源".into(),
             route: Route::ExploreSources,
             right: self
                 .sources
                 .iter()
-                .filter(|s| s.enabled && s.explore && !s.categories.is_empty())
+                .enumerate()
+                .filter(|(i, _)| self.discovery_available(*i))
                 .count()
                 .to_string(),
         });
         for (i, s) in self.sources.iter().enumerate() {
             if self.source_browser.active_explore.as_deref() == Some(s.id.as_str())
-                && s.enabled
-                && s.explore
-                && !s.categories.is_empty()
+                && self.discovery_available(i)
             {
                 items.push(NavItem {
                     id: format!("discover:{}", s.id),

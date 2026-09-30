@@ -524,9 +524,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                         if source.enabled { "●" } else { "○" },
                         pad(&source.name, 16),
                         if source.explore {
-                            "探索开"
+                            "发现开"
                         } else {
-                            "探索关"
+                            "发现关"
                         },
                         status
                     )
@@ -542,9 +542,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     "书源管理 · 离线演示"
                 },
                 if app.live.is_some() {
-                    "i 导入  o 导出  空格 启停  e 探索  v JSON"
+                    "i 导入  o 导出  空格 启停  e 发现  v JSON"
                 } else {
-                    "空格 启停  e 探索  t 测试  v JSON"
+                    "空格 启停  e 发现  t 测试  v JSON"
                 },
                 app.demo.source_sel,
                 rows,

@@ -39,6 +39,8 @@ fn js_http_is_safe_from_async_tasks_and_silent() {
         while served < 4 && std::time::Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // Windows may retain the listener's nonblocking socket mode.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
@@ -76,10 +78,12 @@ fn js_http_is_safe_from_async_tasks_and_silent() {
     let runtime = builder.enable_all().build().unwrap();
     runtime.block_on(async {
         for method in ["ajax", "get", "ajax"] {
-            assert_eq!(
-                eval_js(&format!("java.{method}('{base}/data')"), "", &base).unwrap(),
-                "http-ok"
-            );
+            let script = if method == "get" {
+                format!("java.get('{base}/data', {{}}).body()")
+            } else {
+                format!("java.ajax('{base}/data')")
+            };
+            assert_eq!(eval_js(&script, "", &base).unwrap(), "http-ok");
         }
         let lib = serde_json::json!({"fixture": format!("{base}/lib")}).to_string();
         assert_eq!(

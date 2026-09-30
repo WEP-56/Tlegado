@@ -178,6 +178,18 @@ pub fn source_header_spec(source: &BookSource) -> Result<HeaderSpec, AppError> {
         merge_headers(&mut spec, parse_source_headers(&header_text));
     }
     ensure_default_user_agent(&mut spec.headers);
+    if let Some(runtime) = crate::crawler::source_runtime::SourceRuntime::current()
+        .filter(|runtime| runtime.source.book_source_url == source.book_source_url)
+    {
+        let headers = runtime
+            .session
+            .login_headers()
+            .iter()
+            .filter(|(key, _)| !key.eq_ignore_ascii_case("cookie"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        merge_headers(&mut spec, headers);
+    }
     Ok(spec)
 }
 
@@ -235,6 +247,10 @@ pub fn absolute_url(base: &str, url: &str) -> String {
 }
 
 fn eval_header_rule(rule: &str, source: &BookSource) -> Result<String, AppError> {
+    crate::crawler::source_runtime::with_header(|| eval_header_rule_inner(rule, source))
+}
+
+fn eval_header_rule_inner(rule: &str, source: &BookSource) -> Result<String, AppError> {
     let trimmed = rule.trim();
     if let Some(script) = trimmed.strip_prefix("@js:") {
         return eval_js(script, "", &source.book_source_url).map_err(AppError::Internal);

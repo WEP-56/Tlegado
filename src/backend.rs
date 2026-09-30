@@ -89,10 +89,9 @@ impl Backend {
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let books = self.shelf().await?;
         let sources = self.sources.list(NAMESPACE).await?;
-        let categories = sources
-            .iter()
-            .map(|s| self.books.explore_kinds(s).unwrap_or_default())
-            .collect();
+        // Category scripts may perform HTTP. Load only the selected source in
+        // a background job, never while importing or refreshing all sources.
+        let categories = vec![Vec::new(); sources.len()];
         Ok(Snapshot {
             books,
             sources,
@@ -592,6 +591,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_snapshot_does_not_execute_dynamic_category_scripts() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Backend::open(temp.path()).await.unwrap();
+        let source = BookSource {
+            book_source_name: "延迟加载分类".into(),
+            book_source_url: "https://fixture.invalid/discovery".into(),
+            explore_url: Some("@js:source.setVariable('must not run during snapshot');throw Error('category failure')".into()),
+            enabled_explore: Some(true),
+            ..Default::default()
+        };
+        backend
+            .sources
+            .save(NAMESPACE, source.clone())
+            .await
+            .unwrap();
+        let snapshot = backend.snapshot().await.unwrap();
+        assert_eq!(snapshot.sources.len(), 1);
+        assert!(snapshot.categories[0].is_empty());
+        assert_eq!(
+            backend
+                .books
+                .source_runtime(NAMESPACE, &source)
+                .session
+                .variable(),
+            ""
+        );
+    }
+
+    #[tokio::test]
     async fn batch_source_changes_persist_and_preserve_books() {
         let temp = tempfile::tempdir().unwrap();
         let backend = Backend::open(temp.path()).await.unwrap();
@@ -837,10 +865,12 @@ mod tests {
         assert!(backend.snapshot().await.unwrap().books.is_empty());
         assert_eq!(backend.import(&source_path).await.unwrap(), 1);
         let mut snapshot = backend.snapshot().await.unwrap();
-        assert_eq!(snapshot.categories[0][0].title, "推荐");
+        assert!(snapshot.categories[0].is_empty());
+        let categories = backend.books.explore_kinds(&snapshot.sources[0]).unwrap();
+        assert_eq!(categories[0].title, "推荐");
         let source = snapshot.sources.remove(0);
         let explore = backend
-            .search(&source, "", snapshot.categories[0][0].url.as_deref(), 1)
+            .search(&source, "", categories[0].url.as_deref(), 1)
             .await
             .unwrap();
         assert_eq!(explore.len(), 1);

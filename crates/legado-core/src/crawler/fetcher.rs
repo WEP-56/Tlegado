@@ -83,6 +83,10 @@ pub async fn fetch_with_client(
     request_client: &reqwest::Client,
     req: RequestSpec,
 ) -> anyhow::Result<FetchResponse> {
+    anyhow::ensure!(
+        !req.web_view && req.web_js.as_deref().unwrap_or_default().trim().is_empty(),
+        "unsupported capability: WebView/browser JavaScript"
+    );
     let mut last_err: Option<anyhow::Error> = None;
     let max_retries = req.retry;
     for attempt in 0..=max_retries {
@@ -176,7 +180,11 @@ pub async fn fetch_with_client(
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("fetch failed")))
 }
 
-fn decode_body(bytes: &[u8], charset: Option<&str>, content_type: Option<&str>) -> String {
+pub(crate) fn decode_body(
+    bytes: &[u8],
+    charset: Option<&str>,
+    content_type: Option<&str>,
+) -> String {
     let label = charset
         .map(str::trim)
         .filter(|value| !value.is_empty())

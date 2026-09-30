@@ -23,17 +23,35 @@ pub struct SourceBrowser {
     pub active_explore: Option<String>,
     pub mode: usize,
 }
-const MODES: [&str; 4] = ["全部", "已启用", "已禁用", "可探索"];
+const MODES: [&str; 4] = ["全部", "已启用", "已禁用", "可发现"];
 
 impl App {
+    pub(crate) fn discovery_available(&self, index: usize) -> bool {
+        let Some(source) = self.sources.get(index) else {
+            return false;
+        };
+        source.explore
+            && self
+                .live
+                .as_ref()
+                .map_or(!source.categories.is_empty(), |live| {
+                    !source.categories.is_empty()
+                        || live.sources.get(index).is_some_and(|s| {
+                            s.explore_url
+                                .as_deref()
+                                .is_some_and(|u| !u.trim().is_empty())
+                        })
+                })
+    }
+
     pub(crate) fn source_indices(&self) -> Vec<usize> {
         let query = self.source_browser.filter.trim().to_lowercase();
         let explore = matches!(self.route(), Route::ExploreSources);
         self.sources
             .iter()
             .enumerate()
-            .filter(|(_, source)| {
-                let available = source.enabled && source.explore && !source.categories.is_empty();
+            .filter(|(index, source)| {
+                let available = self.discovery_available(*index);
                 (!explore || available)
                     && (explore
                         || match self.source_browser.mode {
@@ -239,7 +257,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         .cursor
         .min(visible.len().saturating_sub(1));
     let title = if explore {
-        "探索书源"
+        "发现书源"
     } else {
         "书源管理"
     };
@@ -265,7 +283,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(inner);
     let mode = if explore {
-        "可探索"
+        "可发现"
     } else {
         MODES[app.source_browser.mode]
     };
@@ -288,7 +306,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     if visible.is_empty() {
         f.render_widget(
             Paragraph::new(if explore {
-                "没有匹配的可探索书源。请在书源管理启用书源与探索。"
+                "没有匹配的发现书源。请在书源管理开启发现；书源须配置发现入口。"
             } else {
                 "没有匹配的书源。i 导入 JSON；Esc 清空筛选；f 切换状态。"
             })
@@ -318,9 +336,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             source.name,
             source.group,
             if source.explore {
-                "探索开"
+                "发现开"
             } else {
-                "探索关"
+                "发现关"
             }
         );
         f.render_widget(
@@ -338,7 +356,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let hint = if explore {
         "Enter 浏览分类  / 筛选  ? 帮助\nPgUp/PgDn 翻页  g/G 首尾\n分类页 Backspace 返回书源列表"
     } else {
-        "空格 多选  a 全选  x 删除  / 筛选\nEnter 启停  e 探索  f 状态  ? 帮助\ni 导入  o 导出  v JSON  PgUp/PgDn 翻页"
+        "空格 多选  a 全选  x 删除  / 筛选\nEnter 启停  e 发现  f 状态  ? 帮助\ni 导入  o 导出  v JSON  PgUp/PgDn 翻页"
     };
     f.render_widget(Paragraph::new(hint).style(s(THEME.dim)), regions[2]);
 }
@@ -399,7 +417,7 @@ pub fn draw_help(f: &mut Frame, area: Rect) {
     );
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    let text = "/           筛选名称、分组、URL；Enter 结束输入\nj/k ↑/↓     移动；PgUp/PgDn 每次 20 项\ng/G         首尾；Tab 切换侧栏\n\n书源管理\n空格        勾选 / 取消当前项\na / A       全选筛选结果 / 清空选择\nEnter       统一启停（有禁用项则全部启用）\n+ / -       全部启用 / 全部禁用\ne / E       统一切换探索 / 全部关闭探索\nx / Delete  删除；弹框 y 确认，n / Esc 取消\nf           全部 → 已启用 → 已禁用 → 可探索\ni / o       导入 JSON / 导出全部到新文件\nv           查看当前书源完整 JSON\nEsc         依次清空多选、筛选、返回侧栏\n未多选时操作当前项；修改筛选会清空多选。\n\n探索书源\nEnter       打开分类；Backspace 返回书源列表";
+    let text = "/           筛选名称、分组、URL；Enter 结束输入\nj/k ↑/↓     移动；PgUp/PgDn 每次 20 项\ng/G         首尾；Tab 切换侧栏\n\n书源管理\n空格        勾选 / 取消当前项\na / A       全选筛选结果 / 清空选择\nEnter       统一启停（有禁用项则全部启用）\n+ / -       全部启用 / 全部禁用\ne / E       统一切换发现 / 全部关闭发现\nx / Delete  删除；弹框 y 确认，n / Esc 取消\nf           全部 → 已启用 → 已禁用 → 可发现\ni / o       导入 JSON / 导出全部到新文件\nv           查看当前书源完整 JSON\nEsc         依次清空多选、筛选、返回侧栏\n未多选时操作当前项；修改筛选会清空多选。\n\n发现书源\nEnter       打开分类；Backspace 返回书源列表";
     f.render_widget(
         Paragraph::new(text)
             .style(s(THEME.fg))

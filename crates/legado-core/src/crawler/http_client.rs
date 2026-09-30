@@ -23,6 +23,56 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
+    fn source_proxy(&self, proxy: Option<&str>) -> anyhow::Result<Option<String>> {
+        match proxy.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(value) => resolve_manual_proxy(value),
+            None => Ok(self.active_proxy()),
+        }
+    }
+
+    pub fn client_with_cookies<C: reqwest::cookie::CookieStore + 'static>(
+        &self,
+        proxy: Option<&str>,
+        cookies: Arc<C>,
+    ) -> anyhow::Result<Client> {
+        let mut builder = Client::builder()
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .user_agent(super::url_analyzer::DEFAULT_USER_AGENT)
+            .cookie_provider(cookies);
+        if let Some(proxy) = self.source_proxy(proxy)? {
+            builder = builder.proxy(
+                Proxy::all(proxy)?.no_proxy(NoProxy::from_string("localhost,127.0.0.1,::1")),
+            );
+        } else {
+            builder = builder.no_proxy();
+        }
+        Ok(builder.build()?)
+    }
+
+    /// Construct, use and drop this client on the JS HTTP worker, never inside Tokio.
+    pub fn blocking_client_with_cookies<C: reqwest::cookie::CookieStore + 'static>(
+        &self,
+        proxy: Option<&str>,
+        cookies: Arc<C>,
+        follow_redirects: bool,
+    ) -> anyhow::Result<reqwest::blocking::Client> {
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(self.timeout_secs))
+            .user_agent(super::url_analyzer::DEFAULT_USER_AGENT)
+            .cookie_provider(cookies);
+        if !follow_redirects {
+            builder = builder.redirect(reqwest::redirect::Policy::none());
+        }
+        if let Some(proxy) = self.source_proxy(proxy)? {
+            builder = builder.proxy(
+                Proxy::all(proxy)?.no_proxy(NoProxy::from_string("localhost,127.0.0.1,::1")),
+            );
+        } else {
+            builder = builder.no_proxy();
+        }
+        Ok(builder.build()?)
+    }
+
     pub fn new(timeout_secs: u64, proxy: Option<String>) -> anyhow::Result<Self> {
         let configured_proxy = match proxy {
             Some(value) => resolve_manual_proxy(&value)?,
@@ -173,11 +223,18 @@ fn resolve_system_proxy() -> Option<String> {
 }
 
 fn environment_proxy() -> Option<String> {
-    ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
-        .into_iter()
-        .find_map(|key| std::env::var(key).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .into_iter()
+    .find_map(|key| std::env::var(key).ok())
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
 }
 
 #[cfg(target_os = "windows")]
@@ -204,7 +261,12 @@ fn platform_system_proxy() -> Option<String> {
         .output()
         .ok()?;
     let services = String::from_utf8_lossy(&output.stdout);
-    for service in services.lines().skip(1).map(str::trim).filter(|line| !line.is_empty()) {
+    for service in services
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let service = service.trim_start_matches('*').trim();
         for proxy_type in ["-getsecurewebproxy", "-getwebproxy"] {
             let proxy = Command::new("networksetup")

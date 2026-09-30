@@ -48,6 +48,35 @@ enum ParseMode {
     Js,       // JavaScript
 }
 
+// Infallible parser entry points retain their empty-result contract on setup failure.
+fn with_parser_source<T: Default>(source: &BookSource, f: impl FnOnce() -> T) -> T {
+    use crate::crawler::{
+        http_client::HttpClient,
+        source_runtime::{SourceRuntime, SourceSession},
+    };
+    let runtime = match SourceRuntime::current() {
+        Some(runtime) if runtime.source.book_source_url == source.book_source_url => runtime,
+        current => {
+            let http = match current
+                .map(|r| Ok(r.http))
+                .unwrap_or_else(|| HttpClient::new(15, None))
+            {
+                Ok(http) => http,
+                Err(_) => {
+                    tracing::warn!("Could not initialize parser HTTP context");
+                    return T::default();
+                }
+            };
+            SourceRuntime::new(
+                source.clone(),
+                std::sync::Arc::new(SourceSession::default()),
+                http,
+            )
+        }
+    };
+    runtime.enter(|| with_js_lib(source.js_lib.as_deref(), f))
+}
+
 impl RuleEngine {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self)
@@ -109,7 +138,7 @@ impl RuleEngine {
     }
 
     pub fn search_books(&self, source: &BookSource, body: &str, base_url: &str) -> Vec<SearchBook> {
-        with_js_lib(source.js_lib.as_deref(), || {
+        with_parser_source(source, || {
             let rule = source.rule_search.clone().unwrap_or_default();
             let (list_rule, reverse) = normalize_list_rule(rule.book_list.as_deref().unwrap_or(""));
             let mode = self.detect_mode(list_rule, body);
@@ -151,7 +180,7 @@ impl RuleEngine {
         body: &str,
         base_url: &str,
     ) -> Vec<SearchBook> {
-        with_js_lib(source.js_lib.as_deref(), || {
+        with_parser_source(source, || {
             let rule = source
                 .rule_explore
                 .clone()
@@ -176,6 +205,16 @@ impl RuleEngine {
                 }
                 ParseMode::Css => self.search_books_html(source, body, base_url, &rule, list_rule),
             };
+            if results.is_empty()
+                && source
+                    .book_url_pattern
+                    .as_deref()
+                    .is_none_or(|s| s.trim().is_empty())
+            {
+                if let Some(detail_book) = self.search_detail_fallback(source, body, base_url) {
+                    results.push(detail_book);
+                }
+            }
             if reverse {
                 results.reverse();
             }
@@ -190,7 +229,7 @@ impl RuleEngine {
         base_url: &str,
         book_url: &str,
     ) -> Book {
-        with_js_lib(source.js_lib.as_deref(), || {
+        with_parser_source(source, || {
             let rule = source.rule_book_info.clone().unwrap_or_default();
             let mut context = HashMap::new();
 
@@ -231,47 +270,47 @@ impl RuleEngine {
         base_url: &str,
         source_key: Option<&str>,
     ) -> (Vec<BookChapter>, Vec<String>) {
-        with_js_lib(source.js_lib.as_deref(), || {
+        with_parser_source(source, || {
             with_source_key(source_key, || {
                 let rule = source.rule_toc.clone().unwrap_or_default();
-            let mut context = HashMap::new();
-            let (list_rule, reverse) =
-                normalize_list_rule(rule.chapter_list.as_deref().unwrap_or(""));
-            let prepared_body = prepare_toc_body(body, base_url, &rule);
-            let mode = self.detect_mode(list_rule, &prepared_body);
-            let (mut chapters, next_urls) = match mode {
-                ParseMode::JsonPath => parse_chapter_list_json(
-                    &prepared_body,
-                    base_url,
-                    &rule,
-                    list_rule,
-                    &mut context,
-                ),
-                ParseMode::XPath => parse_chapter_list_xpath(
-                    &prepared_body,
-                    base_url,
-                    &rule,
-                    list_rule,
-                    &mut context,
-                ),
-                ParseMode::Js => self.parse_chapter_list_js(
-                    &prepared_body,
-                    base_url,
-                    &rule,
-                    list_rule,
-                    &mut context,
-                ),
-                ParseMode::Regex => {
-                    self.parse_chapter_list_regex(&prepared_body, base_url, &rule, list_rule)
-                }
-                ParseMode::Css => parse_chapter_list_html(
-                    &prepared_body,
-                    base_url,
-                    &rule,
-                    list_rule,
-                    &mut context,
-                ),
-            };
+                let mut context = HashMap::new();
+                let (list_rule, reverse) =
+                    normalize_list_rule(rule.chapter_list.as_deref().unwrap_or(""));
+                let prepared_body = prepare_toc_body(body, base_url, &rule);
+                let mode = self.detect_mode(list_rule, &prepared_body);
+                let (mut chapters, next_urls) = match mode {
+                    ParseMode::JsonPath => parse_chapter_list_json(
+                        &prepared_body,
+                        base_url,
+                        &rule,
+                        list_rule,
+                        &mut context,
+                    ),
+                    ParseMode::XPath => parse_chapter_list_xpath(
+                        &prepared_body,
+                        base_url,
+                        &rule,
+                        list_rule,
+                        &mut context,
+                    ),
+                    ParseMode::Js => self.parse_chapter_list_js(
+                        &prepared_body,
+                        base_url,
+                        &rule,
+                        list_rule,
+                        &mut context,
+                    ),
+                    ParseMode::Regex => {
+                        self.parse_chapter_list_regex(&prepared_body, base_url, &rule, list_rule)
+                    }
+                    ParseMode::Css => parse_chapter_list_html(
+                        &prepared_body,
+                        base_url,
+                        &rule,
+                        list_rule,
+                        &mut context,
+                    ),
+                };
                 apply_toc_format_js(&mut chapters, rule.format_js.as_deref(), base_url);
                 if reverse {
                     chapters.reverse();
@@ -291,67 +330,68 @@ impl RuleEngine {
         base_url: &str,
         source_key: Option<&str>,
     ) -> String {
-        with_js_lib(source.js_lib.as_deref(), || {
+        with_parser_source(source, || {
             with_source_key(source_key, || {
                 let rule = source.rule_content.clone().unwrap_or_default();
                 let mut content_body = body.to_string();
 
-            if let Some(source_regex) = rule
-                .source_regex
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-            {
-                content_body = apply_legado_regex(&content_body, source_regex);
-            }
-            if let Some(web_js) = rule.web_js.as_deref().filter(|s| !s.trim().is_empty()) {
-                if let Ok(processed) =
-                    eval_js(self.strip_mode_prefix(web_js), &content_body, base_url)
+                if let Some(source_regex) = rule
+                    .source_regex
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
                 {
-                    if !processed.trim().is_empty() {
-                        content_body = processed;
-                    }
+                    content_body = apply_legado_regex(&content_body, source_regex);
                 }
-            }
-
-            if let Some(content_rule) = rule.content.clone() {
-                if matches!(
-                    self.detect_mode(&content_rule, &content_body),
-                    ParseMode::Js
-                ) {
-                    let script = self.strip_mode_prefix(&content_rule);
-                    if let Ok(res) = eval_js(script, &content_body, base_url) {
-                        return res;
-                    }
-                }
-
-                let content_rule = self.process_inline_js(&content_rule, &content_body, base_url);
-
-                let mode = self.detect_mode(&content_rule, &content_body);
-                let mut content = match mode {
-                    ParseMode::JsonPath => {
-                        if let Ok(v) = serde_json::from_str::<Value>(&content_body) {
-                            jsonpath::jsonpath_first_string(
-                                &v,
-                                self.strip_mode_prefix(&content_rule),
-                            )
-                            .unwrap_or_default()
-                        } else {
-                            String::new()
+                if let Some(web_js) = rule.web_js.as_deref().filter(|s| !s.trim().is_empty()) {
+                    if let Ok(processed) =
+                        eval_js(self.strip_mode_prefix(web_js), &content_body, base_url)
+                    {
+                        if !processed.trim().is_empty() {
+                            content_body = processed;
                         }
                     }
-                    ParseMode::XPath => {
-                        html::select_xpath(&content_body, self.strip_mode_prefix(&content_rule))
-                            .first()
-                            .cloned()
-                            .unwrap_or_default()
+                }
+
+                if let Some(content_rule) = rule.content.clone() {
+                    if matches!(
+                        self.detect_mode(&content_rule, &content_body),
+                        ParseMode::Js
+                    ) {
+                        let script = self.strip_mode_prefix(&content_rule);
+                        if let Ok(res) = eval_js(script, &content_body, base_url) {
+                            return res;
+                        }
                     }
-                    _ => {
-                        let doc = html::parse_document(&content_body);
-                        let result =
-                            html::select_all_text(&doc, self.strip_mode_prefix(&content_rule));
-                        result.unwrap_or_default()
-                    }
-                };
+
+                    let content_rule =
+                        self.process_inline_js(&content_rule, &content_body, base_url);
+
+                    let mode = self.detect_mode(&content_rule, &content_body);
+                    let mut content = match mode {
+                        ParseMode::JsonPath => {
+                            if let Ok(v) = serde_json::from_str::<Value>(&content_body) {
+                                jsonpath::jsonpath_first_string(
+                                    &v,
+                                    self.strip_mode_prefix(&content_rule),
+                                )
+                                .unwrap_or_default()
+                            } else {
+                                String::new()
+                            }
+                        }
+                        ParseMode::XPath => {
+                            html::select_xpath(&content_body, self.strip_mode_prefix(&content_rule))
+                                .first()
+                                .cloned()
+                                .unwrap_or_default()
+                        }
+                        _ => {
+                            let doc = html::parse_document(&content_body);
+                            let result =
+                                html::select_all_text(&doc, self.strip_mode_prefix(&content_rule));
+                            result.unwrap_or_default()
+                        }
+                    };
 
                     if let Some(replace) = rule.replace_regex.as_deref() {
                         content = apply_legado_regex(&content, replace);
@@ -1613,9 +1653,7 @@ fn eval_field_html_with_ctx(
             // && 拼接所有非空
             "&&" if !results.is_empty() => Some(results.join("")),
             // || 取第一个非空
-            "||" => or_results
-                .into_iter()
-                .find(|v| !v.is_empty()),
+            "||" => or_results.into_iter().find(|v| !v.is_empty()),
             // %% 按索引交织(字段级这里的每一项是单值, 等价于依次拼接)
             "%%" if !results.is_empty() => Some(results.join("")),
             _ => None,
@@ -2773,7 +2811,10 @@ mod tests {
         assert_eq!(results[0].name, "Alpha");
         assert_eq!(results[0].author, "Tester");
         assert_eq!(results[0].book_url, "https://m.example.com/book/1001/");
-        assert_eq!(results[0].cover_url.as_deref(), Some("https://source.example/c1.jpg"));
+        assert_eq!(
+            results[0].cover_url.as_deref(),
+            Some("https://source.example/c1.jpg")
+        );
         assert_eq!(results[1].name, "Beta");
         assert_eq!(results[1].book_url, "https://m.example.com/book/1002/");
     }
@@ -2828,7 +2869,7 @@ mod tests {
             ..Default::default()
         };
 
-        // source_key 传入书籍 bookUrl, 使 source.getKey().match(/\d+/) 能取到 book id
+        // source.getKey() is source identity; the current book URL is exposed separately.
         let (chapters, _) = engine.chapter_list(
             &source,
             "<html></html>",
@@ -2939,7 +2980,8 @@ mod tests {
             </div>
         "#;
 
-        let (chapters, next_urls) = engine.chapter_list(&source, body, "https://books.example", None);
+        let (chapters, next_urls) =
+            engine.chapter_list(&source, body, "https://books.example", None);
         assert!(next_urls.is_empty());
         assert_eq!(chapters.len(), 2);
         assert_eq!(chapters[0].url, "https://books.example/1");

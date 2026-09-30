@@ -1,6 +1,7 @@
 use crate::crawler::{
     fetcher::{fetch_with_client, FetchResponse, RequestSpec, StrResponse},
     http_client::{HttpClient, ProxyMode, ProxyStatus},
+    source_runtime::{CookieProvider, SourceRuntime, SourceSession},
     url_analyzer::analyze_url,
 };
 use crate::error::error::AppError;
@@ -12,8 +13,8 @@ use crate::model::{
 };
 use crate::parser::js::{eval_js, eval_js_with_bindings, with_js_lib};
 use crate::parser::rule_engine::RuleEngine;
-use crate::storage::cache::file_cache::FileCache;
 use crate::service::local_pdf_book::{is_local_pdf_origin, is_local_pdf_url};
+use crate::storage::cache::file_cache::FileCache;
 use crate::util::hash::md5_hex;
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use serde_json::json;
@@ -43,7 +44,7 @@ pub struct BookService {
     parser: RuleEngine,
     cache: FileCache,
     storage_dir: PathBuf,
-    source_cookies: Arc<RwLock<HashMap<String, String>>>,
+    source_sessions: Arc<std::sync::RwLock<HashMap<String, Arc<SourceSession>>>>,
     source_clients: Arc<RwLock<HashMap<String, reqwest::Client>>>,
     login_sessions: Arc<RwLock<HashMap<String, SourceLoginSession>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
@@ -98,11 +99,7 @@ struct SourceLoginSession {
 /// - 验证码页 / WAF tunnel
 /// - 移动站被重定向到 PC 站(`source=m_jump`)
 /// - 非 HTML 的极小响应(代理网关 / 错误页)
-fn detect_anti_crawler(
-    status: u16,
-    body: &str,
-    headers: &[(String, String)],
-) -> Vec<String> {
+fn detect_anti_crawler(status: u16, body: &str, headers: &[(String, String)]) -> Vec<String> {
     let mut warnings = Vec::new();
     let lower = body.to_lowercase();
 
@@ -168,7 +165,7 @@ impl BookService {
             parser,
             cache,
             storage_dir,
-            source_cookies: Arc::new(RwLock::new(HashMap::new())),
+            source_sessions: Arc::new(std::sync::RwLock::new(HashMap::new())),
             source_clients: Arc::new(RwLock::new(HashMap::new())),
             login_sessions: Arc::new(RwLock::new(HashMap::new())),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
@@ -178,6 +175,42 @@ impl BookService {
 
     pub fn http_client(&self) -> reqwest::Client {
         self.http.client()
+    }
+
+    fn source_session(&self, user_ns: &str, source_url: &str) -> Arc<SourceSession> {
+        let key = Self::source_cookie_key(user_ns, source_url);
+        let existing = self
+            .source_sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        existing.unwrap_or_else(|| {
+            self.source_sessions
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(key)
+                .or_insert_with(|| {
+                    Arc::new(SourceSession::persistent(
+                        &self.storage_dir,
+                        user_ns,
+                        source_url,
+                    ))
+                })
+                .clone()
+        })
+    }
+
+    /// An operation context with shared source state and isolated rule variables.
+    pub fn source_runtime(&self, user_ns: &str, source: &BookSource) -> SourceRuntime {
+        let session = self.source_session(user_ns, &source.book_source_url);
+        if let Some(mut runtime) = SourceRuntime::current() {
+            if Arc::ptr_eq(&runtime.session, &session) {
+                runtime.source = source.clone();
+                return runtime;
+            }
+        }
+        SourceRuntime::new(source.clone(), session, self.http.clone())
     }
 
     /// Return a client isolated to one book source. Its cookie jar is never
@@ -190,7 +223,15 @@ impl BookService {
     ) -> Result<reqwest::Client, AppError> {
         let key = Self::source_cookie_key(user_ns, source_url);
         let proxy_key = proxy.map(str::trim).unwrap_or_default();
-        let client_key = format!("{key}::proxy={proxy_key}");
+        let session = self.source_session(user_ns, source_url);
+        session
+            .check()
+            .map_err(|err| AppError::SourceSession(err.to_string()))?;
+        let accept_response = SourceRuntime::current()
+            .filter(|r| Arc::ptr_eq(&r.session, &session))
+            .map(|r| r.source.enabled_cookie_jar == Some(true))
+            .unwrap_or(true);
+        let client_key = format!("{key}::proxy={proxy_key}::cookies={accept_response}");
         if let Some(client) = self.source_clients.read().await.get(&client_key).cloned() {
             return Ok(client);
         }
@@ -201,7 +242,13 @@ impl BookService {
         }
         let client = self
             .http
-            .new_client_with_proxy(proxy)
+            .client_with_cookies(
+                proxy,
+                Arc::new(CookieProvider {
+                    jar: session.cookies.clone(),
+                    accept_response,
+                }),
+            )
             .map_err(AppError::Internal)?;
         clients.insert(client_key, client.clone());
         Ok(client)
@@ -228,7 +275,9 @@ impl BookService {
     pub async fn source_for_login_session(&self, token: &str) -> Option<String> {
         let mut sessions = self.login_sessions.write().await;
         sessions.retain(|_, session| session.created_at.elapsed() <= Duration::from_secs(30 * 60));
-        sessions.get(token).map(|session| session.source_url.clone())
+        sessions
+            .get(token)
+            .map(|session| session.source_url.clone())
     }
 
     pub async fn configure_network_proxy(
@@ -255,37 +304,55 @@ impl BookService {
         source: &BookSource,
         headers: &mut Vec<(String, String)>,
     ) {
-        let key = Self::source_cookie_key(user_ns, &source.book_source_url);
-        if let Some(cookie) = self.source_cookies.read().await.get(&key).cloned() {
-            if !headers
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+        let session = self.source_session(user_ns, &source.book_source_url);
+        for (key, value) in session.login_headers().iter() {
+            if !key.eq_ignore_ascii_case("cookie")
+                && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(key))
             {
-                headers.push(("Cookie".to_string(), cookie));
+                headers.push((key.clone(), value.clone()));
             }
         }
     }
 
-    pub async fn set_source_cookie(&self, user_ns: &str, source_url: &str, cookie: &str) {
+    pub async fn set_source_cookie(
+        &self,
+        user_ns: &str,
+        source_url: &str,
+        cookie: &str,
+    ) -> Result<(), AppError> {
         let cookie = cookie.trim();
         if cookie.is_empty() {
-            return;
+            return Ok(());
         }
         let key = Self::source_cookie_key(user_ns, source_url);
         let prefix = format!("{key}::proxy=");
-        self.source_cookies
-            .write()
-            .await
-            .insert(key.clone(), cookie.to_string());
+        let session = self.source_session(user_ns, source_url);
+        session
+            .cookies
+            .put(source_url, cookie, true)
+            .map_err(|err| AppError::SourceSession(err.to_string()))?;
+        session
+            .js_lib_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.source_clients
             .write()
             .await
             .retain(|client_key, _| client_key != &key && !client_key.starts_with(&prefix));
+        Ok(())
     }
 
-    pub async fn clear_source_cookie(&self, user_ns: &str, source_url: &str) {
+    pub async fn clear_source_cookie(
+        &self,
+        user_ns: &str,
+        source_url: &str,
+    ) -> Result<(), AppError> {
         let key = Self::source_cookie_key(user_ns, source_url);
-        self.source_cookies.write().await.remove(&key);
+        let session = self.source_session(user_ns, source_url);
+        session
+            .clear_auth()
+            .map_err(|err| AppError::SourceSession(err.to_string()))?;
         let prefix = format!("{key}::proxy=");
         self.source_clients
             .write()
@@ -296,6 +363,7 @@ impl BookService {
             .write()
             .await
             .retain(|_, session| session.source_url != source_url);
+        Ok(())
     }
 
     /// Validate a candidate login cookie before storing it: run one search
@@ -311,53 +379,68 @@ impl BookService {
         cookie: &str,
         keyword: &str,
     ) -> Result<(), AppError> {
-        let search_url = source
-            .search_url
-            .clone()
-            .ok_or_else(|| AppError::BadRequest("书源未配置 searchUrl，无法校验 Cookie".to_string()))?;
-        let mut spec = analyze_url(&search_url, keyword, 1, &source.book_source_url, source)
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        // 单次校验请求只携带待验证的 cookie, 不带旧 cookie, 避免旧值干扰判断
-        spec.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
-        spec.headers.push(("Cookie".to_string(), cookie.trim().to_string()));
+        let runtime = SourceRuntime::new(
+            source.clone(),
+            Arc::new(SourceSession::default()),
+            self.http.clone(),
+        );
+        runtime
+            .session
+            .cookies
+            .put(&source.book_source_url, cookie, true)?;
+        runtime
+            .scope(async {
+                let search_url = source.search_url.clone().ok_or_else(|| {
+                    AppError::BadRequest("书源未配置 searchUrl，无法校验 Cookie".to_string())
+                })?;
+                let mut spec =
+                    analyze_url(&search_url, keyword, 1, &source.book_source_url, source)
+                        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+                // 单次校验请求只携带待验证的 cookie, 不带旧 cookie, 避免旧值干扰判断
+                spec.headers
+                    .retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
+                spec.headers
+                    .push(("Cookie".to_string(), cookie.trim().to_string()));
 
-        // Cookie validation must not reuse the source's persistent reqwest
-        // client: its cookie jar may contain an older session and make an
-        // invalid candidate appear valid. Use a fresh client for this request.
-        self.wait_for_rate(source).await;
-        let client = self
-            .http
-            .new_client_with_proxy(spec.proxy.as_deref())
-            .map_err(AppError::Internal)?;
-        let result = fetch_with_client(&client, spec).await;
-        self.finish_rate(source).await;
-        let res = result.map_err(AppError::Internal)?;
-        let body = res.body;
+                // Cookie validation must not reuse the source's persistent reqwest
+                // client: its cookie jar may contain an older session and make an
+                // invalid candidate appear valid. Use a fresh client for this request.
+                self.wait_for_rate(source).await;
+                let client = self
+                    .http
+                    .client_with_cookies(spec.proxy.as_deref(), runtime.cookies())
+                    .map_err(AppError::Internal)?;
+                let result = fetch_with_client(&client, spec).await;
+                self.finish_rate(source).await;
+                let res = apply_login_check_js(source, result.map_err(AppError::Internal)?)?;
+                let body = res.body;
 
-        // 反爬/降级页面在站内跳转前后都不可靠, 直接按内容特征判断
-        let body_lower = body.to_lowercase();
-        if res.status == 202
-            || body_lower.contains("var buid")
-            || body_lower.contains("验证")
-            || body_lower.contains("安全校验")
-            || body_lower.contains("<title>403")
-            || body_lower.contains("access denied")
-        {
-            return Err(AppError::BadRequest(format!(
+                // 反爬/降级页面在站内跳转前后都不可靠, 直接按内容特征判断
+                let body_lower = body.to_lowercase();
+                if res.status == 202
+                    || body_lower.contains("var buid")
+                    || body_lower.contains("验证")
+                    || body_lower.contains("安全校验")
+                    || body_lower.contains("<title>403")
+                    || body_lower.contains("access denied")
+                {
+                    return Err(AppError::BadRequest(format!(
                 "Cookie 无效或已过期(站点返回 {}，疑似被反爬拦截)。请更换抓包 Cookie 后重试",
                 res.status
             )));
-        }
+                }
 
-        // 正常搜索页: 用规则解析一次, 拿不到书就说明页面结构已变, 同样拒绝
-        let books = self.parser.search_books(source, &body, &res.url);
-        if books.is_empty() {
-            return Err(AppError::BadRequest(
-                "Cookie 校验失败: 搜索页未返回任何结果, 请确认 Cookie 有效".to_string(),
-            ));
-        }
+                // 正常搜索页: 用规则解析一次, 拿不到书就说明页面结构已变, 同样拒绝
+                let books = self.parser.search_books(source, &body, &res.url);
+                if books.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "Cookie 校验失败: 搜索页未返回任何结果, 请确认 Cookie 有效".to_string(),
+                    ));
+                }
 
-        Ok(())
+                Ok(())
+            })
+            .await
     }
 
     async fn fetch_source_url(
@@ -368,11 +451,16 @@ impl BookService {
         base_url: &str,
         key: &str,
     ) -> Result<FetchResponse, AppError> {
-        let mut spec = analyze_url(url_rule, key, 1, base_url, source)?;
-        self.apply_source_cookie(user_ns, source, &mut spec.headers)
-            .await;
-        let res = self.fetch_with_rate(user_ns, source, spec).await?;
-        Ok(apply_login_check_js(source, res))
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                let mut spec = analyze_url(url_rule, key, 1, base_url, source)?;
+                self.apply_source_cookie(user_ns, source, &mut spec.headers)
+                    .await;
+                let res = self.fetch_with_rate(user_ns, source, spec).await?;
+                apply_login_check_js(source, res)
+            })
+            .await
     }
 
     async fn fetch_with_rate(
@@ -380,15 +468,17 @@ impl BookService {
         user_ns: &str,
         source: &BookSource,
         spec: RequestSpec,
-    ) -> anyhow::Result<FetchResponse> {
-        self.wait_for_rate(source).await;
+    ) -> Result<FetchResponse, AppError> {
         let request_client = self
             .source_http_client(user_ns, &source.book_source_url, spec.proxy.as_deref())
-            .await
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            .await?;
+        self.wait_for_rate(source).await;
         let result = fetch_with_client(&request_client, spec).await;
         self.finish_rate(source).await;
-        result
+        self.source_session(user_ns, &source.book_source_url)
+            .check()
+            .map_err(|err| AppError::SourceSession(err.to_string()))?;
+        result.map_err(AppError::Internal)
     }
 
     async fn wait_for_rate(&self, source: &BookSource) {
@@ -480,36 +570,44 @@ impl BookService {
         key: &str,
         page: i32,
     ) -> Result<Vec<SearchBook>, AppError> {
-        let search_url = source
-            .search_url
-            .clone()
-            .ok_or_else(|| AppError::BadRequest("missing search_url".to_string()))?;
-        tracing::info!(
-            "searching book from {}: key={}, page={}, url={}",
-            source.book_source_name,
-            key,
-            page,
-            search_url
-        );
-        let mut spec = analyze_url(&search_url, key, page, &source.book_source_url, source)
-            .map_err(|e| {
-                tracing::error!("analyze_url failed: {:?}", e);
-                e
-            })?;
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                let search_url = source
+                    .search_url
+                    .clone()
+                    .ok_or_else(|| AppError::BadRequest("missing search_url".to_string()))?;
+                tracing::info!(
+                    "searching book from {}: key={}, page={}, url={}",
+                    source.book_source_name,
+                    key,
+                    page,
+                    search_url
+                );
+                let mut spec = analyze_url(&search_url, key, page, &source.book_source_url, source)
+                    .map_err(|e| {
+                        tracing::error!("analyze_url failed: {:?}", e);
+                        e
+                    })?;
 
-        self.apply_source_cookie(user_ns, source, &mut spec.headers)
-            .await;
+                self.apply_source_cookie(user_ns, source, &mut spec.headers)
+                    .await;
 
-        tracing::debug!("search_book fetched spec: {:?}", spec);
-        let res = self.fetch_with_rate(user_ns, source, spec).await.map_err(|e| {
-            tracing::error!("fetch failed: {:?}", e);
-            e
-        })?;
-        let res = apply_login_check_js(source, res);
-        tracing::debug!("fetch success, body length: {}", res.body.len());
-        let books = self.parser.search_books(source, &res.body, &res.url);
-        tracing::info!("found {} books", books.len());
-        Ok(books)
+                tracing::debug!("search_book fetched spec: {:?}", spec);
+                let res = self
+                    .fetch_with_rate(user_ns, source, spec)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("fetch failed: {:?}", e);
+                        e
+                    })?;
+                let res = apply_login_check_js(source, res)?;
+                tracing::debug!("fetch success, body length: {}", res.body.len());
+                let books = self.parser.search_books(source, &res.body, &res.url);
+                tracing::info!("found {} books", books.len());
+                Ok(books)
+            })
+            .await
     }
 
     pub async fn explore_book(
@@ -519,20 +617,44 @@ impl BookService {
         rule_find_url: &str,
         page: i32,
     ) -> Result<Vec<SearchBook>, AppError> {
-        if rule_find_url.trim().is_empty() {
-            return Err(AppError::BadRequest("ruleFindUrl required".to_string()));
-        }
-        let mut spec = analyze_url(rule_find_url, "", page, &source.book_source_url, source)?;
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                if rule_find_url.trim().is_empty() {
+                    return Err(AppError::BadRequest("ruleFindUrl required".to_string()));
+                }
+                let mut spec =
+                    analyze_url(rule_find_url, "", page, &source.book_source_url, source)?;
 
-        self.apply_source_cookie(user_ns, source, &mut spec.headers)
-            .await;
+                self.apply_source_cookie(user_ns, source, &mut spec.headers)
+                    .await;
 
-        let res = apply_login_check_js(source, self.fetch_with_rate(user_ns, source, spec).await?);
-        Ok(self.parser.explore_books(source, &res.body, &res.url))
+                let res = apply_login_check_js(
+                    source,
+                    self.fetch_with_rate(user_ns, source, spec).await?,
+                )?;
+                if !(200..300).contains(&res.status) {
+                    return Err(AppError::BadRequest(format!(
+                        "发现请求失败：HTTP {}",
+                        res.status
+                    )));
+                }
+                let books = self.parser.explore_books(source, &res.body, &res.url);
+                if page == 1 && books.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "发现首页未解析到书籍：请检查登录状态、站点内容及发现规则".into(),
+                    ));
+                }
+                Ok(books)
+            })
+            .await
     }
 
     pub fn explore_kinds(&self, source: &BookSource) -> Result<Vec<ExploreKind>, AppError> {
-        parse_explore_kinds(source)
+        let runtime = SourceRuntime::current()
+            .filter(|runtime| runtime.source.book_source_url == source.book_source_url)
+            .unwrap_or_else(|| self.source_runtime("default", source));
+        runtime.enter(|| parse_explore_kinds(source))
     }
 
     pub async fn test_book_source_availability(
@@ -541,61 +663,66 @@ impl BookService {
         source: &BookSource,
         keyword: Option<&str>,
     ) -> BookSourceAvailability {
-        let keyword = keyword
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                source
-                    .rule_search
-                    .as_ref()
-                    .and_then(|rule| rule.check_key_word.as_deref())
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                let keyword = keyword
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        source
+                            .rule_search
+                            .as_ref()
+                            .and_then(|rule| rule.check_key_word.as_deref())
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                    })
+                    .unwrap_or("斗破苍穹")
+                    .to_string();
+
+                let (search_ok, search_error) = if source
+                    .search_url
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && source.rule_search.is_some()
+                {
+                    match self.search_book(user_ns, source, &keyword, 1).await {
+                        Ok(books) => (!books.is_empty(), None),
+                        Err(err) => (false, Some(format!("{err:?}"))),
+                    }
+                } else {
+                    (false, Some("missing searchUrl or ruleSearch".to_string()))
+                };
+
+                let explore_url = self.explore_kinds(source).ok().and_then(|kinds| {
+                    kinds
+                        .into_iter()
+                        .filter_map(|kind| kind.url)
+                        .map(|url| url.trim().to_string())
+                        .find(|url| !url.is_empty())
+                });
+                let (explore_ok, explore_error) = if let Some(url) = explore_url.as_deref() {
+                    match self.explore_book(user_ns, source, url, 1).await {
+                        Ok(books) => (!books.is_empty(), None),
+                        Err(err) => (false, Some(format!("{err:?}"))),
+                    }
+                } else {
+                    (false, Some("missing explore category url".to_string()))
+                };
+
+                BookSourceAvailability {
+                    book_source_url: source.book_source_url.clone(),
+                    book_source_name: source.book_source_name.clone(),
+                    valid: search_ok || explore_ok,
+                    search_ok,
+                    explore_ok,
+                    keyword,
+                    explore_url,
+                    search_error,
+                    explore_error,
+                }
             })
-            .unwrap_or("斗破苍穹")
-            .to_string();
-
-        let (search_ok, search_error) = if source
-            .search_url
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            && source.rule_search.is_some()
-        {
-            match self.search_book(user_ns, source, &keyword, 1).await {
-                Ok(books) => (!books.is_empty(), None),
-                Err(err) => (false, Some(format!("{err:?}"))),
-            }
-        } else {
-            (false, Some("missing searchUrl or ruleSearch".to_string()))
-        };
-
-        let explore_url = self.explore_kinds(source).ok().and_then(|kinds| {
-            kinds
-                .into_iter()
-                .filter_map(|kind| kind.url)
-                .map(|url| url.trim().to_string())
-                .find(|url| !url.is_empty())
-        });
-        let (explore_ok, explore_error) = if let Some(url) = explore_url.as_deref() {
-            match self.explore_book(user_ns, source, url, 1).await {
-                Ok(books) => (!books.is_empty(), None),
-                Err(err) => (false, Some(format!("{err:?}"))),
-            }
-        } else {
-            (false, Some("missing explore category url".to_string()))
-        };
-
-        BookSourceAvailability {
-            book_source_url: source.book_source_url.clone(),
-            book_source_name: source.book_source_name.clone(),
-            valid: search_ok || explore_ok,
-            search_ok,
-            explore_ok,
-            keyword,
-            explore_url,
-            search_error,
-            explore_error,
-        }
+            .await
     }
 
     /// Run a single book-source parsing step for the source debugger.
@@ -612,134 +739,146 @@ impl BookService {
         book_url: &str,
         chapter_url: &str,
     ) -> Result<DebugTrace, AppError> {
-        match step {
-            "search" => {
-                let search_url = source
-                    .search_url
-                    .clone()
-                    .ok_or_else(|| AppError::BadRequest("missing searchUrl".to_string()))?;
-                let kw = if keyword.trim().is_empty() {
-                    source
-                        .rule_search
-                        .as_ref()
-                        .and_then(|r| r.check_key_word.clone())
-                        .unwrap_or_default()
-                } else {
-                    keyword.to_string()
-                };
-                if kw.trim().is_empty() {
-                    return Err(AppError::BadRequest("请输入搜索关键词".to_string()));
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                match step {
+                    "search" => {
+                        let search_url = source
+                            .search_url
+                            .clone()
+                            .ok_or_else(|| AppError::BadRequest("missing searchUrl".to_string()))?;
+                        let kw = if keyword.trim().is_empty() {
+                            source
+                                .rule_search
+                                .as_ref()
+                                .and_then(|r| r.check_key_word.clone())
+                                .unwrap_or_default()
+                        } else {
+                            keyword.to_string()
+                        };
+                        if kw.trim().is_empty() {
+                            return Err(AppError::BadRequest("请输入搜索关键词".to_string()));
+                        }
+                        let res = self
+                            .fetch_source_url(
+                                user_ns,
+                                source,
+                                &search_url,
+                                &source.book_source_url,
+                                &kw,
+                            )
+                            .await?;
+                        let books = self.parser.search_books(source, &res.body, &res.url);
+                        Ok(debug_trace_from(
+                            &res,
+                            serde_json::to_value(books).unwrap_or_default(),
+                        ))
+                    }
+                    "bookInfo" => {
+                        let url = if book_url.trim().is_empty() {
+                            source
+                                .rule_book_info
+                                .as_ref()
+                                .and_then(|r| r.toc_url.clone())
+                                .unwrap_or_default()
+                        } else {
+                            book_url.to_string()
+                        };
+                        if url.trim().is_empty() {
+                            return Err(AppError::BadRequest("请输入书籍链接".to_string()));
+                        }
+                        let res = self
+                            .fetch_source_url(user_ns, source, &url, &source.book_source_url, "")
+                            .await?;
+                        let info = self.parser.book_info(source, &res.body, &res.url, &url);
+                        Ok(debug_trace_from(
+                            &res,
+                            serde_json::to_value(info).unwrap_or_default(),
+                        ))
+                    }
+                    "toc" => {
+                        let toc_url = book_url.trim();
+                        if toc_url.is_empty() {
+                            return Err(AppError::BadRequest("请输入目录链接".to_string()));
+                        }
+                        let res = self
+                            .fetch_source_url(user_ns, source, toc_url, &source.book_source_url, "")
+                            .await?;
+                        let (chapters, _next_urls) =
+                            self.parser
+                                .chapter_list(source, &res.body, &res.url, Some(toc_url));
+                        let mut index = 0i32;
+                        let chapters: Vec<BookChapter> = chapters
+                            .into_iter()
+                            .map(|mut ch| {
+                                ch.index = index;
+                                index += 1;
+                                ch
+                            })
+                            .collect();
+                        Ok(debug_trace_from(
+                            &res,
+                            serde_json::to_value(chapters).unwrap_or_default(),
+                        ))
+                    }
+                    "content" => {
+                        let url = chapter_url.trim();
+                        if url.is_empty() {
+                            return Err(AppError::BadRequest("请输入章节链接".to_string()));
+                        }
+                        let res = self
+                            .fetch_source_url(user_ns, source, url, &source.book_source_url, "")
+                            .await?;
+                        let content = self.parser.content(source, &res.body, &res.url, Some(url));
+                        let next = self.parser.next_content_url(source, &res.body, &res.url);
+                        Ok(debug_trace_from(
+                            &res,
+                            serde_json::json!({
+                                "content": content,
+                                "nextContentUrl": next,
+                            }),
+                        ))
+                    }
+                    other => Err(AppError::BadRequest(format!("未知调试步骤: {other}"))),
                 }
-                let res = self
-                    .fetch_source_url(user_ns, source, &search_url, &source.book_source_url, &kw)
-                    .await?;
-                let books = self.parser.search_books(source, &res.body, &res.url);
-                Ok(debug_trace_from(
-                    &res,
-                    serde_json::to_value(books).unwrap_or_default(),
-                ))
-            }
-            "bookInfo" => {
-                let url = if book_url.trim().is_empty() {
-                    source
-                        .rule_book_info
-                        .as_ref()
-                        .and_then(|r| r.toc_url.clone())
-                        .unwrap_or_default()
-                } else {
-                    book_url.to_string()
-                };
-                if url.trim().is_empty() {
-                    return Err(AppError::BadRequest("请输入书籍链接".to_string()));
-                }
-                let res = self
-                    .fetch_source_url(user_ns, source, &url, &source.book_source_url, "")
-                    .await?;
-                let info = self.parser.book_info(source, &res.body, &res.url, &url);
-                Ok(debug_trace_from(
-                    &res,
-                    serde_json::to_value(info).unwrap_or_default(),
-                ))
-            }
-            "toc" => {
-                let toc_url = book_url.trim();
-                if toc_url.is_empty() {
-                    return Err(AppError::BadRequest("请输入目录链接".to_string()));
-                }
-                let res = self
-                    .fetch_source_url(user_ns, source, toc_url, &source.book_source_url, "")
-                    .await?;
-                let (chapters, _next_urls) =
-                    self.parser.chapter_list(source, &res.body, &res.url, Some(toc_url));
-                let mut index = 0i32;
-                let chapters: Vec<BookChapter> = chapters
-                    .into_iter()
-                    .map(|mut ch| {
-                        ch.index = index;
-                        index += 1;
-                        ch
-                    })
-                    .collect();
-                Ok(debug_trace_from(
-                    &res,
-                    serde_json::to_value(chapters).unwrap_or_default(),
-                ))
-            }
-            "content" => {
-                let url = chapter_url.trim();
-                if url.is_empty() {
-                    return Err(AppError::BadRequest("请输入章节链接".to_string()));
-                }
-                let res = self
-                    .fetch_source_url(user_ns, source, url, &source.book_source_url, "")
-                    .await?;
-                let content = self.parser.content(source, &res.body, &res.url, Some(url));
-                let next = self.parser.next_content_url(source, &res.body, &res.url);
-                Ok(debug_trace_from(
-                    &res,
-                    serde_json::json!({
-                        "content": content,
-                        "nextContentUrl": next,
-                    }),
-                ))
-            }
-            other => Err(AppError::BadRequest(format!("未知调试步骤: {other}"))),
-        }
+            })
+            .await
     }
 
     pub async fn login_book_source(
         &self,
         source: &BookSource,
     ) -> Result<serde_json::Value, AppError> {
-        let login_url = source
-            .login_url
-            .clone()
-            .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| AppError::BadRequest("missing loginUrl".to_string()))?;
+        let runtime = self.source_runtime("default", source);
+        runtime
+            .scope(async {
+                let login_url = source
+                    .login_url
+                    .clone()
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| AppError::BadRequest("missing loginUrl".to_string()))?;
 
-        let spec = analyze_url(&login_url, "", 1, &source.book_source_url, source)?;
+                let spec = analyze_url(&login_url, "", 1, &source.book_source_url, source)?;
 
-        let res = self.fetch_with_rate("default", source, spec).await?;
-        let check_result = if let Some(login_check_js) = source
-            .login_check_js
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            Some(with_js_lib(source.js_lib.as_deref(), || {
-                eval_js(login_check_js, &res.body, &res.url).unwrap_or_default()
-            }))
-        } else {
-            None
-        };
+                let res = self.fetch_with_rate("default", source, spec).await?;
+                let res = apply_login_check_js(source, res)?;
+                let check_result = source
+                    .login_check_js
+                    .as_deref()
+                    .filter(|script| !script.trim().is_empty())
+                    .map(|_| res.body.clone());
 
-        Ok(serde_json::json!({
-            "success": true,
-            "status": res.status,
-            "url": res.url,
-            "checkResult": check_result,
-            "bodyPreview": res.body.chars().take(500).collect::<String>(),
-            "bodyHtml": res.body
-        }))
+                Ok(serde_json::json!({
+                    "success": res.is_successful,
+                    "status": res.status,
+                    "url": res.url,
+                    "checkResult": check_result,
+                    "bodyPreview": res.body.chars().take(500).collect::<String>(),
+                    "bodyHtml": res.body
+                }))
+            })
+            .await
     }
 
     pub async fn get_book_info(
@@ -748,10 +887,15 @@ impl BookService {
         source: &BookSource,
         book_url: &str,
     ) -> Result<Book, AppError> {
-        let res = self
-            .fetch_source_url(user_ns, source, book_url, &source.book_source_url, "")
-            .await?;
-        Ok(self.parser.book_info(source, &res.body, &res.url, book_url))
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                let res = self
+                    .fetch_source_url(user_ns, source, book_url, &source.book_source_url, "")
+                    .await?;
+                Ok(self.parser.book_info(source, &res.body, &res.url, book_url))
+            })
+            .await
     }
 
     pub async fn get_chapter_list(
@@ -796,6 +940,8 @@ impl BookService {
         source: &BookSource,
         toc_url: &str,
     ) -> Result<(Vec<BookChapter>, ChapterPagination), AppError> {
+        let runtime = self.source_runtime(user_ns, source);
+        runtime.scope(async {
         let res = self
             .fetch_source_url(user_ns, source, toc_url, &source.book_source_url, "")
             .await?;
@@ -858,6 +1004,7 @@ impl BookService {
         };
 
         Ok((result, pagination))
+        }).await
     }
 
     /// Continue fetching remaining chapters from pagination state
@@ -865,129 +1012,134 @@ impl BookService {
         &self,
         pagination: ChapterPagination,
     ) -> Result<Vec<BookChapter>, AppError> {
-        let mut all_chapters = Vec::new();
-        let mut visited_page_urls: std::collections::HashSet<String> =
-            pagination.visited_urls.iter().cloned().collect();
-        let mut seen_chapter_urls: std::collections::HashSet<String> =
-            pagination.seen_chapter_urls.iter().cloned().collect();
-        let mut chapter_index = pagination.next_index;
+        let runtime = self.source_runtime(&pagination.user_ns, &pagination.source);
+        runtime
+            .scope(async {
+                let mut all_chapters = Vec::new();
+                let mut visited_page_urls: std::collections::HashSet<String> =
+                    pagination.visited_urls.iter().cloned().collect();
+                let mut seen_chapter_urls: std::collections::HashSet<String> =
+                    pagination.seen_chapter_urls.iter().cloned().collect();
+                let mut chapter_index = pagination.next_index;
 
-        let pending_urls: Vec<String> = pagination
-            .pending_urls
-            .into_iter()
-            .filter(|u| !visited_page_urls.contains(u))
-            .collect();
-
-        if pending_urls.len() > 1 {
-            // Multiple URLs from option dropdown - fetch all pages
-            for url in pending_urls {
-                if visited_page_urls.contains(&url) {
-                    continue;
-                }
-                visited_page_urls.insert(url.clone());
-
-                let res = self
-                    .fetch_source_url(
-                        &pagination.user_ns,
-                        &pagination.source,
-                        &url,
-                        &pagination.source.book_source_url,
-                        "",
-                    )
-                    .await?;
-                let (chapters, _) = self.parser.chapter_list(
-                    &pagination.source,
-                    &res.body,
-                    &res.url,
-                    Some(&pagination.toc_url),
-                );
-
-                // Check if this page is a duplicate (all chapters already seen)
-                // This handles cases where the first page URL differs from toc_url (e.g., different domain)
-                let all_seen = chapters
-                    .iter()
-                    .all(|ch| seen_chapter_urls.contains(&ch.url));
-                if all_seen && !chapters.is_empty() {
-                    tracing::debug!("Skipping duplicate page: {}", url);
-                    continue;
-                }
-
-                for ch in chapters {
-                    if seen_chapter_urls.contains(&ch.url) {
-                        continue;
-                    }
-                    seen_chapter_urls.insert(ch.url.clone());
-
-                    all_chapters.push(BookChapter {
-                        title: ch.title,
-                        url: ch.url,
-                        index: chapter_index,
-                        ..Default::default()
-                    });
-                    chapter_index += 1;
-                }
-            }
-        } else if pending_urls.len() == 1 {
-            // Single next page link - follow sequentially
-            let mut current_url = pending_urls[0].clone();
-            loop {
-                if visited_page_urls.contains(&current_url) {
-                    break;
-                }
-                visited_page_urls.insert(current_url.clone());
-
-                let res = self
-                    .fetch_source_url(
-                        &pagination.user_ns,
-                        &pagination.source,
-                        &current_url,
-                        &pagination.source.book_source_url,
-                        "",
-                    )
-                    .await?;
-                let (chapters, next_urls) = self.parser.chapter_list(
-                    &pagination.source,
-                    &res.body,
-                    &res.url,
-                    Some(&pagination.toc_url),
-                );
-
-                // Check if this page is a duplicate
-                let all_seen = chapters
-                    .iter()
-                    .all(|ch| seen_chapter_urls.contains(&ch.url));
-                if all_seen && !chapters.is_empty() {
-                    tracing::debug!("Skipping duplicate page: {}", current_url);
-                    break; // Stop following pagination if we hit a duplicate page
-                }
-
-                for ch in chapters {
-                    if seen_chapter_urls.contains(&ch.url) {
-                        continue;
-                    }
-                    seen_chapter_urls.insert(ch.url.clone());
-
-                    all_chapters.push(BookChapter {
-                        title: ch.title,
-                        url: ch.url,
-                        index: chapter_index,
-                        ..Default::default()
-                    });
-                    chapter_index += 1;
-                }
-
-                // Get next page
-                let next = next_urls
+                let pending_urls: Vec<String> = pagination
+                    .pending_urls
                     .into_iter()
-                    .find(|u| !visited_page_urls.contains(u));
-                match next {
-                    Some(url) if !url.is_empty() => current_url = url,
-                    _ => break,
-                }
-            }
-        }
+                    .filter(|u| !visited_page_urls.contains(u))
+                    .collect();
 
-        Ok(all_chapters)
+                if pending_urls.len() > 1 {
+                    // Multiple URLs from option dropdown - fetch all pages
+                    for url in pending_urls {
+                        if visited_page_urls.contains(&url) {
+                            continue;
+                        }
+                        visited_page_urls.insert(url.clone());
+
+                        let res = self
+                            .fetch_source_url(
+                                &pagination.user_ns,
+                                &pagination.source,
+                                &url,
+                                &pagination.source.book_source_url,
+                                "",
+                            )
+                            .await?;
+                        let (chapters, _) = self.parser.chapter_list(
+                            &pagination.source,
+                            &res.body,
+                            &res.url,
+                            Some(&pagination.toc_url),
+                        );
+
+                        // Check if this page is a duplicate (all chapters already seen)
+                        // This handles cases where the first page URL differs from toc_url (e.g., different domain)
+                        let all_seen = chapters
+                            .iter()
+                            .all(|ch| seen_chapter_urls.contains(&ch.url));
+                        if all_seen && !chapters.is_empty() {
+                            tracing::debug!("Skipping duplicate page: {}", url);
+                            continue;
+                        }
+
+                        for ch in chapters {
+                            if seen_chapter_urls.contains(&ch.url) {
+                                continue;
+                            }
+                            seen_chapter_urls.insert(ch.url.clone());
+
+                            all_chapters.push(BookChapter {
+                                title: ch.title,
+                                url: ch.url,
+                                index: chapter_index,
+                                ..Default::default()
+                            });
+                            chapter_index += 1;
+                        }
+                    }
+                } else if pending_urls.len() == 1 {
+                    // Single next page link - follow sequentially
+                    let mut current_url = pending_urls[0].clone();
+                    loop {
+                        if visited_page_urls.contains(&current_url) {
+                            break;
+                        }
+                        visited_page_urls.insert(current_url.clone());
+
+                        let res = self
+                            .fetch_source_url(
+                                &pagination.user_ns,
+                                &pagination.source,
+                                &current_url,
+                                &pagination.source.book_source_url,
+                                "",
+                            )
+                            .await?;
+                        let (chapters, next_urls) = self.parser.chapter_list(
+                            &pagination.source,
+                            &res.body,
+                            &res.url,
+                            Some(&pagination.toc_url),
+                        );
+
+                        // Check if this page is a duplicate
+                        let all_seen = chapters
+                            .iter()
+                            .all(|ch| seen_chapter_urls.contains(&ch.url));
+                        if all_seen && !chapters.is_empty() {
+                            tracing::debug!("Skipping duplicate page: {}", current_url);
+                            break; // Stop following pagination if we hit a duplicate page
+                        }
+
+                        for ch in chapters {
+                            if seen_chapter_urls.contains(&ch.url) {
+                                continue;
+                            }
+                            seen_chapter_urls.insert(ch.url.clone());
+
+                            all_chapters.push(BookChapter {
+                                title: ch.title,
+                                url: ch.url,
+                                index: chapter_index,
+                                ..Default::default()
+                            });
+                            chapter_index += 1;
+                        }
+
+                        // Get next page
+                        let next = next_urls
+                            .into_iter()
+                            .find(|u| !visited_page_urls.contains(u));
+                        match next {
+                            Some(url) if !url.is_empty() => current_url = url,
+                            _ => break,
+                        }
+                    }
+                }
+
+                Ok(all_chapters)
+            })
+            .await
     }
 
     async fn get_chapter_list_with_pagination(
@@ -996,87 +1148,25 @@ impl BookService {
         source: &BookSource,
         toc_url: &str,
     ) -> Result<(Vec<BookChapter>, Vec<String>), AppError> {
-        let mut all_chapters = Vec::new();
-        let mut visited_page_urls = std::collections::HashSet::new();
-        let mut seen_chapter_urls = std::collections::HashSet::new();
-        let mut chapter_index = 0i32;
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                let mut all_chapters = Vec::new();
+                let mut visited_page_urls = std::collections::HashSet::new();
+                let mut seen_chapter_urls = std::collections::HashSet::new();
+                let mut chapter_index = 0i32;
 
-        // Fetch first page
-        let res = self
-            .fetch_source_url(user_ns, source, toc_url, &source.book_source_url, "")
-            .await?;
-        let (chapters, next_urls) =
-            self.parser.chapter_list(source, &res.body, &res.url, Some(toc_url));
-
-        visited_page_urls.insert(toc_url.to_string());
-
-        // Add first page chapters with deduplication
-        for ch in chapters {
-            if seen_chapter_urls.contains(&ch.url) {
-                continue;
-            }
-            seen_chapter_urls.insert(ch.url.clone());
-            all_chapters.push(BookChapter {
-                title: ch.title,
-                url: ch.url,
-                index: chapter_index,
-                ..Default::default()
-            });
-            chapter_index += 1;
-        }
-
-        // Determine how to handle pagination
-        // Filter out already visited URLs
-        let pending_urls: Vec<String> = next_urls
-            .into_iter()
-            .filter(|u| !visited_page_urls.contains(u))
-            .collect();
-
-        if pending_urls.len() > 1 {
-            // Multiple URLs from option dropdown - fetch all pages
-            for url in pending_urls {
-                if visited_page_urls.contains(&url) {
-                    continue;
-                }
-                visited_page_urls.insert(url.clone());
-
+                // Fetch first page
                 let res = self
-                    .fetch_source_url(user_ns, source, &url, &source.book_source_url, "")
+                    .fetch_source_url(user_ns, source, toc_url, &source.book_source_url, "")
                     .await?;
-                let (chapters, _) = self
-                    .parser
-                    .chapter_list(source, &res.body, &res.url, Some(toc_url));
+                let (chapters, next_urls) =
+                    self.parser
+                        .chapter_list(source, &res.body, &res.url, Some(toc_url));
 
-                for ch in chapters {
-                    if seen_chapter_urls.contains(&ch.url) {
-                        continue;
-                    }
-                    seen_chapter_urls.insert(ch.url.clone());
-                    all_chapters.push(BookChapter {
-                        title: ch.title,
-                        url: ch.url,
-                        index: chapter_index,
-                        ..Default::default()
-                    });
-                    chapter_index += 1;
-                }
-            }
-        } else if pending_urls.len() == 1 {
-            // Single next page link - follow sequentially
-            let mut current_url = pending_urls[0].clone();
-            loop {
-                if visited_page_urls.contains(&current_url) {
-                    break;
-                }
-                visited_page_urls.insert(current_url.clone());
+                visited_page_urls.insert(toc_url.to_string());
 
-                let res = self
-                    .fetch_source_url(user_ns, source, &current_url, &source.book_source_url, "")
-                    .await?;
-                let (chapters, next_urls) = self
-                    .parser
-                    .chapter_list(source, &res.body, &res.url, Some(toc_url));
-
+                // Add first page chapters with deduplication
                 for ch in chapters {
                     if seen_chapter_urls.contains(&ch.url) {
                         continue;
@@ -1091,18 +1181,92 @@ impl BookService {
                     chapter_index += 1;
                 }
 
-                // Get next page
-                let next = next_urls
+                // Determine how to handle pagination
+                // Filter out already visited URLs
+                let pending_urls: Vec<String> = next_urls
                     .into_iter()
-                    .find(|u| !visited_page_urls.contains(u));
-                match next {
-                    Some(url) if !url.is_empty() => current_url = url,
-                    _ => break,
-                }
-            }
-        }
+                    .filter(|u| !visited_page_urls.contains(u))
+                    .collect();
 
-        Ok((all_chapters, visited_page_urls.into_iter().collect()))
+                if pending_urls.len() > 1 {
+                    // Multiple URLs from option dropdown - fetch all pages
+                    for url in pending_urls {
+                        if visited_page_urls.contains(&url) {
+                            continue;
+                        }
+                        visited_page_urls.insert(url.clone());
+
+                        let res = self
+                            .fetch_source_url(user_ns, source, &url, &source.book_source_url, "")
+                            .await?;
+                        let (chapters, _) =
+                            self.parser
+                                .chapter_list(source, &res.body, &res.url, Some(toc_url));
+
+                        for ch in chapters {
+                            if seen_chapter_urls.contains(&ch.url) {
+                                continue;
+                            }
+                            seen_chapter_urls.insert(ch.url.clone());
+                            all_chapters.push(BookChapter {
+                                title: ch.title,
+                                url: ch.url,
+                                index: chapter_index,
+                                ..Default::default()
+                            });
+                            chapter_index += 1;
+                        }
+                    }
+                } else if pending_urls.len() == 1 {
+                    // Single next page link - follow sequentially
+                    let mut current_url = pending_urls[0].clone();
+                    loop {
+                        if visited_page_urls.contains(&current_url) {
+                            break;
+                        }
+                        visited_page_urls.insert(current_url.clone());
+
+                        let res = self
+                            .fetch_source_url(
+                                user_ns,
+                                source,
+                                &current_url,
+                                &source.book_source_url,
+                                "",
+                            )
+                            .await?;
+                        let (chapters, next_urls) =
+                            self.parser
+                                .chapter_list(source, &res.body, &res.url, Some(toc_url));
+
+                        for ch in chapters {
+                            if seen_chapter_urls.contains(&ch.url) {
+                                continue;
+                            }
+                            seen_chapter_urls.insert(ch.url.clone());
+                            all_chapters.push(BookChapter {
+                                title: ch.title,
+                                url: ch.url,
+                                index: chapter_index,
+                                ..Default::default()
+                            });
+                            chapter_index += 1;
+                        }
+
+                        // Get next page
+                        let next = next_urls
+                            .into_iter()
+                            .find(|u| !visited_page_urls.contains(u));
+                        match next {
+                            Some(url) if !url.is_empty() => current_url = url,
+                            _ => break,
+                        }
+                    }
+                }
+
+                Ok((all_chapters, visited_page_urls.into_iter().collect()))
+            })
+            .await
     }
 
     pub async fn get_content(
@@ -1112,68 +1276,85 @@ impl BookService {
         source: &BookSource,
         chapter_url: &str,
     ) -> Result<String, AppError> {
-        let book_key = md5_hex(book_url);
-        tracing::debug!(
-            "get_content called, chapter_url={}, book_key={}",
-            chapter_url,
-            book_key
-        );
-        if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
-            tracing::debug!("get_content returning cached content, len={}", cached.len());
-            return Ok(cached);
-        }
-        tracing::debug!("get_content cache miss, fetching from network");
+        let runtime = self.source_runtime(user_ns, source);
+        runtime
+            .scope(async {
+                let book_key = md5_hex(book_url);
+                tracing::debug!(
+                    "get_content called, chapter_url={}, book_key={}",
+                    chapter_url,
+                    book_key
+                );
+                if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
+                    tracing::debug!("get_content returning cached content, len={}", cached.len());
+                    return Ok(cached);
+                }
+                tracing::debug!("get_content cache miss, fetching from network");
 
-        let mut all_content = String::new();
-        let mut visited_urls = std::collections::HashSet::new();
-        let mut current_url = chapter_url.to_string();
+                let mut all_content = String::new();
+                let mut visited_urls = std::collections::HashSet::new();
+                let mut current_url = chapter_url.to_string();
 
-        // Follow pagination to get all content pages
-        loop {
-            if visited_urls.contains(&current_url) {
-                tracing::debug!("get_content detected loop, breaking");
-                break;
-            }
-            visited_urls.insert(current_url.clone());
+                // Follow pagination to get all content pages
+                loop {
+                    if visited_urls.contains(&current_url) {
+                        tracing::debug!("get_content detected loop, breaking");
+                        break;
+                    }
+                    visited_urls.insert(current_url.clone());
 
-            tracing::debug!("get_content fetching: {}", current_url);
-            let res = self
-                .fetch_source_url(user_ns, source, &current_url, &source.book_source_url, "")
-                .await?;
-            tracing::debug!("get_content fetch done, body len={}", res.body.len());
-            let content = self.parser.content(source, &res.body, &res.url, Some(book_url));
-            tracing::debug!("get_content parsed content len={}", content.len());
+                    tracing::debug!("get_content fetching: {}", current_url);
+                    let res = self
+                        .fetch_source_url(
+                            user_ns,
+                            source,
+                            &current_url,
+                            &source.book_source_url,
+                            "",
+                        )
+                        .await?;
+                    tracing::debug!("get_content fetch done, body len={}", res.body.len());
+                    let content = self
+                        .parser
+                        .content(source, &res.body, &res.url, Some(book_url));
+                    tracing::debug!("get_content parsed content len={}", content.len());
 
-            if !content.is_empty() {
+                    if !content.is_empty() {
+                        if !all_content.is_empty() {
+                            all_content.push('\n');
+                        }
+                        all_content.push_str(&content);
+                    }
+
+                    // Check for next page
+                    if let Some(next_url) =
+                        self.parser.next_content_url(source, &res.body, &res.url)
+                    {
+                        tracing::debug!("get_content found next_url: {}", next_url);
+                        if should_follow_content_page(chapter_url, &current_url, &next_url) {
+                            current_url = next_url;
+                        } else {
+                            tracing::debug!(
+                                "get_content next_url appears to be next chapter, stopping"
+                            );
+                            break;
+                        }
+                    } else {
+                        tracing::debug!("get_content no more pages");
+                        break;
+                    }
+                }
+
+                tracing::debug!("get_content final content len={}", all_content.len());
                 if !all_content.is_empty() {
-                    all_content.push('\n');
+                    let _ = self
+                        .cache
+                        .put(user_ns, &book_key, chapter_url, &all_content)
+                        .await;
                 }
-                all_content.push_str(&content);
-            }
-
-            // Check for next page
-            if let Some(next_url) = self.parser.next_content_url(source, &res.body, &res.url) {
-                tracing::debug!("get_content found next_url: {}", next_url);
-                if should_follow_content_page(chapter_url, &current_url, &next_url) {
-                    current_url = next_url;
-                } else {
-                    tracing::debug!("get_content next_url appears to be next chapter, stopping");
-                    break;
-                }
-            } else {
-                tracing::debug!("get_content no more pages");
-                break;
-            }
-        }
-
-        tracing::debug!("get_content final content len={}", all_content.len());
-        if !all_content.is_empty() {
-            let _ = self
-                .cache
-                .put(user_ns, &book_key, chapter_url, &all_content)
-                .await;
-        }
-        Ok(all_content)
+                Ok(all_content)
+            })
+            .await
     }
 
     /// Delete all chapter content cache for a book
@@ -1270,9 +1451,9 @@ impl BookService {
         author: &str,
     ) -> Result<Option<Book>, AppError> {
         let list = self.read_bookshelf(user_ns).await?;
-        Ok(list.into_iter().find(|b| {
-            same_remote_book_identity(&b.name, &b.author, name, author)
-        }))
+        Ok(list
+            .into_iter()
+            .find(|b| same_remote_book_identity(&b.name, &b.author, name, author)))
     }
 
     pub async fn save_book(&self, user_ns: &str, mut book: Book) -> Result<Book, AppError> {
@@ -1330,20 +1511,36 @@ impl BookService {
 
     /// Replace a specific shelf entry in one atomic write, even if the new
     /// source uses a different display name. Never delete the old entry first.
-    pub async fn replace_book_source(&self, user_ns: &str, previous: &Book, mut book: Book) -> Result<Book, AppError> {
+    pub async fn replace_book_source(
+        &self,
+        user_ns: &str,
+        previous: &Book,
+        mut book: Book,
+    ) -> Result<Book, AppError> {
         sanitize_book_urls(&mut book);
         if book.origin.trim().is_empty() || book.book_url.trim().is_empty() {
             return Err(AppError::BadRequest("bookUrl and origin required".into()));
         }
         let _write_guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
-        let Some(index) = list.iter().position(|b| b.book_url == previous.book_url && b.origin == previous.origin) else {
-            return Err(AppError::BadRequest("原书籍已不在书架，请重新打开后换源".into()));
+        let Some(index) = list
+            .iter()
+            .position(|b| b.book_url == previous.book_url && b.origin == previous.origin)
+        else {
+            return Err(AppError::BadRequest(
+                "原书籍已不在书架，请重新打开后换源".into(),
+            ));
         };
         merge_book_source_candidates(&list[index], &mut book);
         // A URL collision with another entry must not destroy either book.
-        if list.iter().enumerate().any(|(i, b)| i != index && b.book_url == book.book_url) {
-            return Err(AppError::BadRequest("目标书籍已在书架，请从书架打开".into()));
+        if list
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i != index && b.book_url == book.book_url)
+        {
+            return Err(AppError::BadRequest(
+                "目标书籍已在书架，请从书架打开".into(),
+            ));
         }
         list[index] = book.clone();
         self.write_bookshelf(user_ns, &list).await?;
@@ -1676,13 +1873,19 @@ impl BookService {
         let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result: std::io::Result<()> = async {
             let mut file = fs::OpenOptions::new()
-                .write(true).create_new(true).open(&temporary).await?;
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await?;
             file.write_all(data.as_bytes()).await?;
             file.sync_all().await?;
             drop(file);
             fs::rename(&temporary, &path).await
-        }.await;
-        if result.is_err() { let _ = fs::remove_file(&temporary).await; }
+        }
+        .await;
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary).await;
+        }
         result.map_err(|e| AppError::Internal(e.into()))?;
         Ok(())
     }
@@ -1788,13 +1991,16 @@ impl BookService {
     }
 }
 
-fn apply_login_check_js(source: &BookSource, res: FetchResponse) -> FetchResponse {
+fn apply_login_check_js(
+    source: &BookSource,
+    res: FetchResponse,
+) -> Result<FetchResponse, AppError> {
     let Some(script) = source
         .login_check_js
         .as_deref()
         .filter(|script| !script.trim().is_empty())
     else {
-        return res;
+        return Ok(res);
     };
 
     with_js_lib(source.js_lib.as_deref(), || {
@@ -1804,27 +2010,24 @@ fn apply_login_check_js(source: &BookSource, res: FetchResponse) -> FetchRespons
             "result".to_string(),
             serde_json::to_value(&str_response).unwrap_or_else(|_| json!({})),
         );
-        match eval_js_with_bindings(script, &res.body, &res.url, &bindings) {
-            Ok(output) if !output.trim().is_empty() => {
-                if let Ok(next) = serde_json::from_str::<StrResponse>(&output) {
-                    FetchResponse::from(next)
-                } else {
-                    FetchResponse {
-                        body: output,
-                        ..res
-                    }
-                }
-            }
-            Ok(_) => res,
-            Err(err) => {
-                tracing::warn!(
-                    "loginCheckJs failed for {}: {:?}",
-                    source.book_source_name,
-                    err
-                );
-                res
-            }
+        let output = eval_js_with_bindings(script, &res.body, &res.url, &bindings)
+            .map_err(|_| AppError::BadRequest("loginCheckJs 执行失败".to_string()))?;
+        if output.trim() == "false" {
+            return Err(AppError::BadRequest("loginCheckJs 校验未通过".to_string()));
         }
+        if output.trim().is_empty() || output.trim() == "true" {
+            return Ok(res);
+        }
+        Ok(
+            if let Ok(next) = serde_json::from_str::<StrResponse>(&output) {
+                FetchResponse::from(next)
+            } else {
+                FetchResponse {
+                    body: output,
+                    ..res
+                }
+            },
+        )
     })
 }
 
@@ -1839,13 +2042,19 @@ fn parse_explore_kinds(source: &BookSource) -> Result<Vec<ExploreKind>, AppError
     };
 
     let text = with_js_lib(source.js_lib.as_deref(), || {
-        if let Some(script) = raw.strip_prefix("@js:") {
-            eval_js(script, "", &source.book_source_url).map_err(AppError::Internal)
-        } else if let Some(script) = raw
-            .strip_prefix("<js>")
-            .and_then(|value| value.strip_suffix("</js>"))
-        {
-            eval_js(script, "", &source.book_source_url).map_err(AppError::Internal)
+        if raw.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("@js:")) {
+            eval_js(&raw[4..], "", &source.book_source_url)
+                .map_err(|e| AppError::BadRequest(format!("发现分类脚本执行失败：{e}")))
+        } else if raw.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("<js>")) {
+            let end = raw.len().saturating_sub(5);
+            if !raw
+                .get(end..)
+                .is_some_and(|s| s.eq_ignore_ascii_case("</js>"))
+            {
+                return Err(AppError::BadRequest("发现分类缺少 </js>".into()));
+            }
+            eval_js(&raw[4..end], "", &source.book_source_url)
+                .map_err(|e| AppError::BadRequest(format!("发现分类脚本执行失败：{e}")))
         } else {
             Ok(raw.to_string())
         }
@@ -1860,6 +2069,9 @@ fn parse_explore_kinds(source: &BookSource) -> Result<Vec<ExploreKind>, AppError
         }
     }
 
+    if text.trim_start().starts_with('[') {
+        return Err(AppError::BadRequest("发现分类 JSON 格式错误".into()));
+    }
     let splitter = regex::Regex::new(r"(&&|\n)+").unwrap();
     Ok(splitter
         .split(&text)
@@ -2278,10 +2490,8 @@ mod tests {
 
     #[tokio::test]
     async fn login_sessions_are_random_and_bound_to_one_source() {
-        let storage_dir = std::env::temp_dir().join(format!(
-            "reader-rust-login-session-{}",
-            std::process::id()
-        ));
+        let storage_dir =
+            std::env::temp_dir().join(format!("reader-rust-login-session-{}", std::process::id()));
         let service = BookService::new(
             HttpClient::new(5, None).unwrap(),
             RuleEngine::new().unwrap(),
@@ -2355,25 +2565,48 @@ mod tests {
             FileCache::new(temp.path().join("cache")),
             temp.path().to_str().unwrap(),
         );
-        let original = service.save_book("default", Book {
-            name: "替换测试".into(), author: "测试作者".into(),
-            origin: "https://a.invalid".into(), book_url: "https://a.invalid/book".into(),
-            dur_chapter_index: Some(4), ..Default::default()
-        }).await.unwrap();
+        let original = service
+            .save_book(
+                "default",
+                Book {
+                    name: "替换测试".into(),
+                    author: "测试作者".into(),
+                    origin: "https://a.invalid".into(),
+                    book_url: "https://a.invalid/book".into(),
+                    dur_chapter_index: Some(4),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
         let path = service.bookshelf_path("default");
         let before = fs::read(&path).await.unwrap();
         // Permit reads, deny replacing the destination after the temporary file
         // has been written, so this exercises the final commit failure.
-        let locked = std::fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
         let replacement = Book {
-            origin: "https://b.invalid".into(), book_url: "https://b.invalid/book".into(),
+            origin: "https://b.invalid".into(),
+            book_url: "https://b.invalid/book".into(),
             ..original.clone()
         };
-        assert!(service.replace_book_source("default", &original, replacement.clone()).await.is_err());
+        assert!(service
+            .replace_book_source("default", &original, replacement.clone())
+            .await
+            .is_err());
         assert_eq!(fs::read(&path).await.unwrap(), before);
-        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
         drop(locked);
-        service.replace_book_source("default", &original, replacement).await.unwrap();
+        service
+            .replace_book_source("default", &original, replacement)
+            .await
+            .unwrap();
         let books = service.get_bookshelf("default").await.unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].origin, "https://b.invalid");
@@ -2401,8 +2634,12 @@ mod tests {
 
         let candidates = incoming.source_candidates.expect("source candidates");
         assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().any(|item| item.origin == "https://source-a.test"));
-        assert!(candidates.iter().any(|item| item.origin == "https://source-b.test"));
+        assert!(candidates
+            .iter()
+            .any(|item| item.origin == "https://source-a.test"));
+        assert!(candidates
+            .iter()
+            .any(|item| item.origin == "https://source-b.test"));
     }
 
     #[tokio::test]
@@ -2448,8 +2685,12 @@ mod tests {
             .as_ref()
             .expect("source candidates");
         assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().any(|item| item.origin == "https://source-a.test"));
-        assert!(candidates.iter().any(|item| item.origin == "https://source-b.test"));
+        assert!(candidates
+            .iter()
+            .any(|item| item.origin == "https://source-a.test"));
+        assert!(candidates
+            .iter()
+            .any(|item| item.origin == "https://source-b.test"));
 
         let _ = tokio::fs::remove_dir_all(&storage_dir).await;
     }

@@ -59,6 +59,8 @@ pub struct Live {
     failures: usize,
     last_error: String,
     discover_key: Option<(String, usize)>,
+    category_request: Option<(u64, String)>,
+    category_errors: HashMap<String, String>,
     last_route: String,
     last_saved: Option<(String, u32, usize)>,
 }
@@ -91,6 +93,8 @@ impl Default for Live {
             failures: 0,
             last_error: String::new(),
             discover_key: None,
+            category_request: None,
+            category_errors: HashMap::new(),
             last_route: "home".into(),
             last_saved: None,
         }
@@ -98,7 +102,7 @@ impl Default for Live {
 }
 impl Live {
     pub fn busy(&self) -> bool {
-        !self.ready || self.querying || self.opening
+        !self.ready || self.querying || self.opening || self.category_request.is_some()
     }
 
     fn next_id(&mut self) -> u64 {
@@ -285,6 +289,22 @@ impl App {
             return false;
         }
         match (self.route().clone(), key.code) {
+            (Route::Discover { source_idx }, KeyCode::Char('R')) => {
+                self.load_discovery_categories(source_idx);
+                true
+            }
+            (Route::Discover { source_idx }, KeyCode::Char('r'))
+                if self
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .categories
+                    .get(source_idx)
+                    .is_none_or(|c| c.is_empty()) =>
+            {
+                self.load_discovery_categories(source_idx);
+                true
+            }
             (Route::Search | Route::Discover { .. }, KeyCode::Char('n' | 'r')) => {
                 let target = usize::from(matches!(self.route(), Route::Discover { .. }));
                 self.continue_live_query(target, key.code == KeyCode::Char('r'));
@@ -363,6 +383,10 @@ impl App {
             live.read_id = 0;
             live.querying = false;
             live.opening = false;
+            if let Some((_, source)) = live.category_request.take() {
+                live.category_errors
+                    .insert(source, "发现分类加载已取消 · r 重试".into());
+            }
             live.status = "已取消".into();
             self.commands.push(Command::Cancel);
         }
@@ -378,6 +402,27 @@ impl App {
             self.commands.push(Command::Open { id, book });
             self.toast = None;
         }
+    }
+
+    fn load_discovery_categories(&mut self, index: usize) {
+        self.cancel_live_reads();
+        let live = self.live.as_mut().unwrap();
+        let Some(source) = live.sources.get(index).cloned() else {
+            return;
+        };
+        let id = live.next_id();
+        live.category_errors.remove(&source.book_source_url);
+        live.category_request = Some((id, source.book_source_url.clone()));
+        live.queries[1] = Query::default();
+        live.query_target = 1;
+        live.categories[index].clear();
+        self.sources[index].categories.clear();
+        live.discover.clear();
+        live.discover_key = None;
+        self.discover_cat = 0;
+        self.discover_sel = 0;
+        live.status = "正在加载发现分类… · Esc 取消".into();
+        self.commands.push(Command::ExploreKinds { id, source });
     }
 
     pub fn start_live_query(&mut self, discover: bool) {
@@ -678,9 +723,16 @@ impl App {
         }
         if self.reader.is_none() {
             if let Route::Discover { source_idx } = self.route() {
+                let index = *source_idx;
                 let live = self.live.as_ref().unwrap();
-                if let Some(source) = self.sources.get(*source_idx) {
-                    if live.discover_key != Some((source.id.clone(), self.discover_cat)) {
+                if let Some(source) = self.sources.get(index) {
+                    if live.categories.get(index).is_none_or(|c| c.is_empty()) {
+                        if let Some(error) = live.category_errors.get(&source.id) {
+                            self.live.as_mut().unwrap().status = error.clone();
+                        } else if live.category_request.is_none() {
+                            self.load_discovery_categories(index);
+                        }
+                    } else if live.discover_key != Some((source.id.clone(), self.discover_cat)) {
                         self.start_live_query(true);
                     }
                 }
@@ -853,6 +905,9 @@ impl App {
                 self.demo.source_sel = self.demo.source_sel.min(sources.len().saturating_sub(1));
                 let live = self.live.as_mut().unwrap();
                 live.ready = true;
+                live.category_request = None;
+                live.category_errors.clear();
+                live.discover_key = None;
                 live.sources = sources;
                 live.categories = categories;
                 self.source_browser
@@ -873,6 +928,58 @@ impl App {
                     "书源已就绪 · / 搜索书籍".into()
                 };
                 self.load_shelf(books);
+            }
+            Event::ExploreKinds { id, source, result } => {
+                let live = self.live.as_mut().unwrap();
+                if live.category_request.as_ref() != Some(&(id, source.clone())) {
+                    return;
+                }
+                live.category_request = None;
+                let Some(index) = live
+                    .sources
+                    .iter()
+                    .position(|s| s.book_source_url == source)
+                else {
+                    return;
+                };
+                let result = result.and_then(|kinds| {
+                    let guidance = kinds
+                        .iter()
+                        .filter(|k| k.url.as_deref().is_none_or(|u| u.trim().is_empty()))
+                        .map(|k| k.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ");
+                    // Legado's empty-URL entries are section labels, not links.
+                    let links: Vec<_> = kinds
+                        .into_iter()
+                        .filter(|k| k.url.as_deref().is_some_and(|u| !u.trim().is_empty()))
+                        .collect();
+                    if links.is_empty() {
+                        Err(if guidance.is_empty() {
+                            "书源没有可打开的发现分类".into()
+                        } else {
+                            guidance
+                        })
+                    } else {
+                        Ok(links)
+                    }
+                });
+                match result {
+                    Ok(kinds) => {
+                        self.sources[index].categories =
+                            kinds.iter().map(|k| k.title.clone()).collect();
+                        live.categories[index] = kinds;
+                        live.category_errors.remove(&source);
+                        live.discover_key = None;
+                        live.status.clear();
+                    }
+                    Err(error) => {
+                        let error = format!("发现分类加载失败：{error} · r 重试");
+                        live.category_errors.insert(source, error.clone());
+                        live.status = error;
+                    }
+                }
+                self.rebuild_nav();
             }
             Event::Shelf(books) => self.load_shelf(books),
             Event::QueryPart {
@@ -1322,6 +1429,100 @@ mod tests {
         app.apply_live_event(Event::QueryDone(old));
         assert!(app.live.as_ref().unwrap().discover.is_empty());
         assert!(app.live.as_ref().unwrap().querying);
+    }
+
+    #[test]
+    fn discovery_lists_enabled_sources_before_categories_and_skips_heading_requests() {
+        let mut app = app();
+        app.live.as_mut().unwrap().sources[0].explore_url = Some("@js:dynamic()".into());
+        app.sources[0].enabled = false; // Discovery is independent of search enablement.
+        app.sources[0].explore = true;
+        app.rebuild_nav();
+        app.goto_id_for_test("discover:sources");
+        assert_eq!(app.source_indices(), vec![0]);
+        key(&mut app, KeyCode::Enter);
+        app.sync_live();
+        let (id, source) = app.live.as_ref().unwrap().category_request.clone().unwrap();
+        assert!(matches!(
+            app.commands.last(),
+            Some(Command::ExploreKinds { .. })
+        ));
+        let count = app.commands.len();
+        app.sync_live();
+        assert_eq!(app.commands.len(), count);
+        app.apply_live_event(Event::ExploreKinds {
+            id,
+            source,
+            result: Ok(vec![
+                ExploreKind {
+                    title: "分组标题".into(),
+                    url: Some("".into()),
+                    ..Default::default()
+                },
+                ExploreKind {
+                    title: "玄幻".into(),
+                    url: Some("/fantasy?page={{page}}".into()),
+                    ..Default::default()
+                },
+            ]),
+        });
+        app.sync_live();
+        assert_eq!(app.sources[0].categories, vec!["玄幻"]);
+        assert!(
+            matches!(app.commands.last(), Some(Command::Query { explore:Some(url), .. }) if url=="/fantasy?page={{page}}")
+        );
+    }
+
+    #[test]
+    fn discovery_errors_are_visible_retryable_and_cancelled_results_are_ignored() {
+        let mut app = app();
+        app.live.as_mut().unwrap().sources[0].explore_url = Some("@js:dynamic()".into());
+        app.sources[0].explore = true;
+        app.rebuild_nav();
+        app.goto_id_for_test("discover:sources");
+        key(&mut app, KeyCode::Enter);
+        app.sync_live();
+        let (id, source) = app.live.as_ref().unwrap().category_request.clone().unwrap();
+        app.apply_live_event(Event::ExploreKinds {
+            id,
+            source: source.clone(),
+            result: Err("缺少接口".into()),
+        });
+        app.sync_live();
+        assert!(app.live.as_ref().unwrap().status.contains("缺少接口"));
+        assert!(app.live.as_ref().unwrap().category_request.is_none());
+        key(&mut app, KeyCode::Char('r'));
+        let (retry, _) = app.live.as_ref().unwrap().category_request.clone().unwrap();
+        assert_ne!(retry, id);
+        app.apply_live_event(Event::ExploreKinds {
+            id,
+            source: source.clone(),
+            result: Ok(vec![]),
+        });
+        assert!(app.live.as_ref().unwrap().category_request.is_some());
+        app.cancel_live_reads();
+        app.apply_live_event(Event::ExploreKinds {
+            id: retry,
+            source: source.clone(),
+            result: Ok(vec![ExploreKind {
+                title: "旧结果".into(),
+                url: Some("/old".into()),
+                ..Default::default()
+            }]),
+        });
+        assert!(app.live.as_ref().unwrap().categories[0].is_empty());
+        key(&mut app, KeyCode::Char('r'));
+        let (id, _) = app.live.as_ref().unwrap().category_request.clone().unwrap();
+        app.apply_live_event(Event::ExploreKinds {
+            id,
+            source,
+            result: Ok(vec![ExploreKind {
+                title: "请先登录".into(),
+                url: Some("".into()),
+                ..Default::default()
+            }]),
+        });
+        assert!(app.live.as_ref().unwrap().status.contains("请先登录"));
     }
 
     #[test]

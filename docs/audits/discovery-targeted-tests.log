@@ -1,0 +1,89 @@
+   Compiling reader-rust v1.4.6 (E:\Tlegado\crates\legado-core)
+   Compiling tlegado v0.1.0 (E:\Tlegado)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 31.52s
+     Running unittests src\lib.rs (target\debug\deps\reader_rust-cdcfbbfdc9b28152.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 94 filtered out; finished in 0.00s
+
+     Running tests\book_source_compat.rs (target\debug\deps\book_source_compat-4393a92ca994b3b2.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests\book_source_headers.rs (target\debug\deps\book_source_headers-fa6941d462a93c12.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\book_source_validation.rs (target\debug\deps\book_source_validation-8f1a7dcee4f89e38.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests\fetch_terminal_output.rs (target\debug\deps\fetch_terminal_output-2d1cc271c935a553.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\js_compat.rs (target\debug\deps\js_compat-3d6789f966638453.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\js_http_async.rs (target\debug\deps\js_http_async-9d495552e9a6202f.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\local_epub_book.rs (target\debug\deps\local_epub_book-bd6e8ac408579ce1.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests\local_txt_book.rs (target\debug\deps\local_txt_book-0ef96790a377909c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests\source_runtime.rs (target\debug\deps\source_runtime-69e72f0800f040a3.exe)
+
+running 4 tests
+test discovery_reports_invalid_json_and_script_errors_instead_of_fake_categories ... ok
+test discovery_jsoup_supports_nested_selectors_and_reports_unsupported_css ... ok
+test discovery_jsoup_categories_load_and_fetch_paginated_books ... ok
+test discovery_reports_http_and_first_page_parse_failures_but_allows_empty_later_pages ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.19s
+
+     Running tests\version_update.rs (target\debug\deps\version_update-a1212387c36a56de.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests\yckceo_live_sources.rs (target\debug\deps\yckceo_live_sources-5bfd3b5e42f26f4b.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\tlegado-f6d905ab88e39d2b.exe)
+
+running 5 tests
+test live::tests::home_discovery_uses_source_urls_instead_of_demo_ids ... ok
+test live::tests::discovery_lists_enabled_sources_before_categories_and_skips_heading_requests ... ok
+test live::tests::discovery_errors_are_visible_retryable_and_cancelled_results_are_ignored ... ok
+test live::tests::discovery_category_change_resets_pagination_and_discards_old_results ... ok
+test backend::tests::discovery_snapshot_does_not_execute_dynamic_category_scripts ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 72 filtered out; finished in 0.04s

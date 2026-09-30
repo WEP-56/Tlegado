@@ -1,0 +1,305 @@
+   Compiling reader-rust v1.4.6 (E:\Tlegado\crates\legado-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 40.34s
+     Running unittests src\lib.rs (target\debug\deps\reader_rust-4cee29fef1d83bf2.exe)
+
+running 94 tests
+test crawler::http_client::tests::selects_https_then_http_from_windows_proxy_list ... ok
+test export::tests::passes_through_plain_text_without_tags ... ok
+test parser::html::tests::test_split_xpath_axis_leaves_standard_xpath_axis_intact ... ok
+test crawler::http_client::tests::manual_proxy_rejects_unsupported_scheme ... ok
+test parser::html::tests::test_parse_selector_with_index ... ok
+test parser::js::tests::java_date_format_keeps_literal_text ... ok
+test parser::js::tests::java_date_format_to_chrono_converts_common_patterns ... ok
+test parser::html::tests::test_legado_to_css ... ok
+test crawler::fetcher::tests::decode_body_uses_response_charset ... ok
+test crawler::fetcher::tests::decode_body_detects_html_meta_charset ... ok
+test parser::rule_analyzer::tests::split_ignores_delimiters_inside_attribute_selector ... ok
+test crawler::http_client::tests::manual_proxy_accepts_local_address_without_scheme ... ok
+test parser::js::tests::java_time_format_utc_with_java_pattern ... ok
+test parser::html::tests::test_extract_attr_bracket_syntax ... ok
+test parser::rule_engine::tests::test_detect_mode ... ok
+test export::tests::keeps_inline_text_spaced ... ok
+test export::tests::handles_br_and_nested_blocks ... ok
+test export::tests::strips_tags_and_breaks_blocks_into_lines ... ok
+test parser::html::tests::test_select_text_list_with_bracket_indices ... ok
+test parser::html::tests::select_xpath_outer_html_extractor_returns_outer_html ... ok
+test parser::html::tests::select_xpath_html_extractor_returns_inner_html ... ok
+test parser::html::tests::test_xpath_axis_extensions ... ok
+test parser::rule_engine::tests::test_apply_legado_regex ... ok
+test service::book_service::tests::detect_anti_crawler_flags_degraded_405_response ... ok
+test service::book_service::tests::detect_anti_crawler_flags_pc_verification_page ... ok
+test service::book_service::tests::detect_anti_crawler_ignores_normal_html_200 ... ok
+test export::epub::tests::write_epub_roundtrips_valid_package_with_chapters ... ok
+test service::book_service::tests::local_pdf_books_are_treated_as_local_books ... ok
+test parser::rule_engine::tests::test_search_books_regex_list ... ok
+test service::book_service::tests::login_sessions_are_random_and_bound_to_one_source ... ok
+test parser::rule_engine::tests::test_chapter_list_keeps_real_chapterlist_container ... ok
+test service::book_service::tests::merging_same_book_retains_each_source_candidate ... ok
+test parser::rule_engine::tests::test_book_info_html_interpolates_get_template ... ok
+test parser::rule_engine::tests::test_search_detail_fallback_uses_book_info_rules ... ok
+test service::book_service::tests::missing_author_does_not_overwrite_another_sources_book ... ok
+test service::book_service::tests::same_remote_book_matches_across_sources ... ok
+test service::book_service::tests::source_cookie_keys_do_not_share_same_domain_sources ... ok
+test service::local_pdf_book::tests::build_chapters_empty_book ... ok
+test service::local_pdf_book::tests::build_chapters_drops_out_of_range_and_same_page_outline ... ok
+test service::local_pdf_book::tests::build_chapters_sorts_non_monotonic_outline ... ok
+test service::local_pdf_book::tests::build_chapters_with_outline_uses_bookmarks ... ok
+test service::local_pdf_book::tests::chapter_text_path_is_stable ... ok
+test service::local_pdf_book::tests::decode_pdf_text_string_handles_utf16_and_latin1 ... ok
+test service::local_pdf_book::tests::detect_headings_finds_chapter_titles ... ok
+test service::local_pdf_book::tests::build_chapters_without_outline_groups_fixed_pages ... ok
+test service::local_pdf_book::tests::detect_headings_skips_toc_pages_and_duplicates ... ok
+test service::local_pdf_book::tests::drop_blank_chapters_removes_and_reindexes ... ok
+test service::local_pdf_book::tests::ends_with_sentence_terminal_handles_quotes_and_ellipses ... ok
+test service::local_pdf_book::tests::ensure_non_blank_rejects_empty ... ok
+test service::local_pdf_book::tests::fold_doubled_render_text_folds_pure_doubled_lines ... ok
+test service::local_pdf_book::tests::is_heading_line_rejects_prose ... ok
+test service::local_pdf_book::tests::fold_doubled_render_text_keeps_normal_text ... ok
+test service::local_pdf_book::tests::join_pages_merges_paragraphs_within_chapter ... ok
+test service::local_pdf_book::tests::join_pages_skips_blank_pages ... ok
+test service::local_pdf_book::tests::merge_wrapped_lines_adds_ascii_space_when_merging_ascii ... ok
+test service::local_pdf_book::tests::merge_wrapped_lines_breaks_after_sentence_terminal ... ok
+test service::local_pdf_book::tests::merge_wrapped_lines_breaks_before_indented_line ... ok
+test service::local_pdf_book::tests::merge_wrapped_lines_keeps_headings_standalone ... ok
+test service::local_pdf_book::tests::merge_wrapped_lines_keeps_page_numbers_standalone ... ok
+test service::local_pdf_book::tests::merge_wrapped_lines_keeps_short_lines_separate ... ok
+test service::local_pdf_book::tests::merge_wrapped_lines_rejoins_split_sentences ... ok
+test parser::rule_engine::tests::test_field_level_chain_and_or ... ok
+test parser::rule_engine::tests::test_search_books_js_java_get_content ... ok
+test parser::rule_engine::tests::test_search_books_js_uses_js_lib ... ok
+test parser::rule_engine::tests::test_search_books_js_json_list ... ok
+test parser::rule_engine::tests::test_search_books_js_pipe_kv ... ok
+test service::update_service::tests::github_asset_uses_github_input_and_frontend_output_names ... ok
+test parser::rule_engine::tests::test_chapter_list_js_and_format_js ... ok
+test parser::rule_engine::tests::test_java_crypto_and_encoding_api ... ok
+test service::book_service::tests::failed_atomic_replacement_keeps_original_bookshelf_and_cleans_temporary_file ... ok
+test service::book_service::tests::concurrent_source_saves_keep_one_book_and_both_candidates ... ok
+test service::reading_stats_service::tests::same_book_different_source_urls_merges_into_one_row ... ok
+test service::reading_stats_service::tests::replace_all_round_trips_full_history ... ok
+test service::reading_stats_service::tests::same_name_different_authors_not_merged ... ok
+test service::reading_stats_service::tests::delete_book_stats_removes_all_rows_across_source_urls ... ok
+test service::reading_stats_service::tests::aggregates_reading_time_by_book_and_range ... ok
+test service::reading_stats_service::tests::delete_book_stats_removes_only_target_book ... ok
+test parser::rule_engine::tests::test_chapter_list_js_pipe_with_js_field_rules ... ok
+test parser::rule_engine::tests::test_search_books_js_newline_json_with_js_field_rules ... ok
+test service::book_service::tests::window_rate_waits_when_existing_starts_reach_limit ... ok
+test storage::db::tests::keeps_rejecting_genuinely_modified_migrations ... ok
+test storage::db::tests::repairs_checksum_created_with_windows_line_endings ... ok
+test service::user_service::tests::get_user_info_reports_admin_authorization_from_secure_key ... ok
+test storage::db::repo::tests::failed_delete_batch_rolls_back_and_respects_namespace ... ok
+test service::user_service::tests::get_user_info_refreshes_current_session_and_returns_current_token ... ok
+test service::user_service::tests::delete_user_removes_sqlite_account_documents ... ok
+test storage::db::repo::tests::failed_batch_rolls_back_earlier_inserts ... ok
+test service::user_service::tests::legacy_users_without_admin_promote_earliest_account ... ok
+test service::user_service::tests::migrates_legacy_users_json_to_sqlite ... ok
+test service::user_service::tests::get_user_info_returns_logged_in_user_when_secure_is_disabled ... ok
+test service::user_service::tests::require_login_user_ns_rejects_missing_token_when_secure_is_disabled ... ok
+test service::user_service::tests::secure_disabled_uses_logged_in_namespace_or_default ... ok
+test service::user_service::tests::login_keeps_legacy_session_and_supports_multi_device ... ok
+test service::user_service::tests::concurrent_auth_refreshes_keep_session_token ... ok
+
+test result: ok. 94 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests\book_source_compat.rs (target\debug\deps\book_source_compat-0c4f831f44cc1f3a.exe)
+
+running 17 tests
+test book_source_accepts_numeric_metadata_as_strings ... ok
+test book_source_deserializes_stringified_rule_objects ... ok
+test html_rule_split_ignores_delimiters_inside_attribute_selectors ... ok
+test explore_kinds_accept_relaxed_style_objects ... ok
+test explore_kinds_accept_relaxed_angle_item_objects ... ok
+test jsonpath_supports_embedded_path_templates ... ok
+test explore_books_falls_back_to_search_rule_when_rule_explore_is_empty ... ok
+test all_in_one_regex_keeps_group_zero_literal ... ok
+test explore_kinds_support_text_and_js_rules ... ok
+test legacy_book_source_fields_are_migrated_to_current_shape ... ok
+test chapter_list_strips_css_mode_prefix ... ok
+test url_analyzer_encodes_get_query_with_declared_charset ... ok
+test url_analyzer_supports_inline_js_page_choices_headers_and_response_type ... ok
+test search_pipeline_uses_url_analyzer_final_url_and_login_check_js ... ok
+test url_analyzer_accepts_raw_newlines_in_option_strings ... ok
+test url_analyzer_supports_single_brace_key_and_page_placeholders ... ok
+test content_pagination_stops_before_next_chapter_url ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests\book_source_headers.rs (target\debug\deps\book_source_headers-8866345ead9417d4.exe)
+
+running 1 test
+test chapter_list_requests_include_legacy_source_headers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\book_source_validation.rs (target\debug\deps\book_source_validation-c6f33d51fd036997.exe)
+
+running 2 tests
+test invalid_group_marker_is_added_and_removed_without_overwriting_other_groups ... ok
+test source_availability_is_valid_when_search_or_explore_has_results ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests\fetch_terminal_output.rs (target\debug\deps\fetch_terminal_output-3d623fbbacdc6659.exe)
+
+running 1 test
+test fetch_does_not_write_to_terminal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests\js_compat.rs (target\debug\deps\js_compat-1d001f949d8f55be.exe)
+
+running 1 test
+test java_aes_base64_decode_to_string_decrypts_legado_paths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\js_http_async.rs (target\debug\deps\js_http_async-c1979d01e644a322.exe)
+
+running 1 test
+test js_http_is_safe_from_async_tasks_and_silent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests\local_epub_book.rs (target\debug\deps\local_epub_book-91a3181a0aceae48.exe)
+
+running 4 tests
+test real_sample_epub_imports_from_repo_epub_folder_when_present ... ok
+test epub_import_rejects_non_epub_and_path_traversal ... ok
+test epub2_ncx_titles_are_used_for_chapter_list ... ok
+test epub_import_saves_manifest_chapters_and_assets ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\local_txt_book.rs (target\debug\deps\local_txt_book-94d76d2bb850fa2e.exe)
+
+running 10 tests
+test txt_chapter_urls_are_stable_by_book_url_and_index ... ok
+test txt_service_rejects_non_hash_local_txt_urls ... ok
+test txt_import_rejects_non_txt_files ... ok
+test txt_parser_falls_back_to_single_body_chapter ... ok
+test txt_parser_allows_empty_chapters_between_adjacent_headings ... ok
+test txt_parser_splits_no_space_chapter_headings ... ok
+test txt_parser_splits_common_chapter_headings ... ok
+test txt_delete_removes_imported_book_files ... ok
+test txt_import_saves_book_index_and_content_for_server_bookshelf ... ok
+test saving_same_named_local_txt_books_keeps_distinct_book_urls ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\source_runtime.rs (target\debug\deps\source_runtime-2751c43702436bff.exe)
+
+running 12 tests
+test cookie_store_preserves_scope_expiry_and_transactional_import ... ok
+test parser_source_identity_is_independent_of_book_and_page_urls ... ok
+test task_contexts_survive_interleaved_awaits_and_restore_after_cancellation ... ok
+test source_state_and_operation_variables_have_distinct_lifetimes ... ok
+test downloaded_libraries_cannot_share_authenticated_content_between_users ... ok
+test browser_requests_report_unsupported_in_native_and_script_paths ... ok
+test login_headers_have_consistent_precedence_and_do_not_resurrect_removed_cookies ... ok
+test disabled_cookie_jar_keeps_manual_cookies_but_ignores_response_cookies ... ok
+test login_check_receives_response_methods_and_propagates_failure ... ok
+test native_search_and_javascript_share_cookies_in_both_directions ... ok
+test sessions_are_isolated_by_user_and_source_even_on_the_same_host ... ok
+test javascript_http_contracts_headers_redirects_charset_and_post ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+     Running tests\version_update.rs (target\debug\deps\version_update-fa5924aeea14bf4b.exe)
+
+running 2 tests
+test compares_release_tags_as_semver_versions ... ok
+test dismissed_latest_release_remains_update_without_reminder ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\yckceo_live_sources.rs (target\debug\deps\yckceo_live_sources-52bac012818f7183.exe)
+
+running 1 test
+test yckceo_live_non_webview_sources_end_to_end ... ignored, hits the live YCKCeo source repository and public book sites
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\tlegado-62bbdc2b791b3f8e.exe)
+
+running 74 tests
+test backend::local_tests::cli_local_imports_accept_multiple_paths_and_reject_missing_path_or_demo ... ok
+test app::reader_tests::empty_book_does_not_enter_reader ... ok
+test app::reader_tests::chapters_select_before_open_and_clamp_at_bounds ... ok
+test app::reader_tests::shelf_opens_selected_book_and_restores_selection ... ok
+test app::reader_tests::home_search_discover_open_preview ... ok
+test book_logo::tests::animation_has_braille_and_changes_during_flip ... ok
+test demo::tests::history_records_reader_progress_and_can_restore ... ok
+test demo::tests::source_controls_toggle_test_and_json ... ok
+test demo::tests::purify_and_preferences_change_preview_state ... ok
+test backend::tests::imports_validate_entire_batch_and_keep_legacy_compatibility ... ok
+test library::tests::group_assignment_empty_group_navigation_and_local_import_are_available ... ok
+test app::reader_tests::reader_renders_chapters_scrolls_and_handles_resize ... ok
+test backend::local_tests::malformed_local_imports_never_create_shelf_entries ... ok
+test library::tests::keyboard_forms_validate_and_require_confirmation_and_do_not_mutate_before_ack ... ok
+test library::view_regressions::group_reorder_preserves_current_group_by_id ... ok
+test library::view_regressions::preview_editor_uses_typed_text_without_saving_a_rule ... ok
+test backend::local_tests::epub_removal_preserves_original_and_clears_managed_book ... ok
+test backend::tests::previews_and_stale_progress_never_create_shelf_entries ... ok
+test live::tests::cancelled_open_never_enters_reader ... ok
+test jobs::library_tests::failed_preference_write_is_reported_at_exit_and_valid_retry_clears_it ... ok
+test live::tests::discovery_category_change_resets_pagination_and_discards_old_results ... ok
+test live::tests::home_discovery_uses_source_urls_instead_of_demo_ids ... ok
+test live::tests::failed_chapter_keeps_loaded_text_and_reader_position ... ok
+test live::tests::input_modal_captures_shortcuts_and_preserves_unicode_paths ... ok
+test live::tests::load_more_preserves_selection_and_ignores_late_previous_page ... ok
+test library::tests::rule_reordering_editing_and_corrupt_preferences_are_checked ... ok
+test live::tests::preview_switch_skips_shelf_commit ... ok
+test live::tests::preview_add_saves_current_position_and_removal_stops_autosave ... ok
+test live::tests::old_search_results_and_completion_cannot_replace_new_query ... ok
+test live::tests::live_help_shows_pagination_and_source_actions_at_standard_size ... ok
+test live::tests::switch_waits_for_persisted_ack_and_failed_commit_is_retryable ... ok
+test live::tests::shelf_removal_requires_confirmation_and_import_prompts_capture_keys ... ok
+test live::tests::source_json_preview_never_applies_demo_toggles ... ok
+test plugins::tests::layout_maps_argb_spacing_and_preserves_unsupported_fields ... ok
+test plugins::tests::imports_keep_scopes_unknown_fields_and_disabled_unsupported_patterns ... ok
+test jobs::library_tests::shutdown_drains_local_import_and_ordered_configuration_changes ... ok
+test purify::tests::chained_literal_and_regex_replacements_keep_original_unicode_offsets ... ok
+test jobs::tests::bridge_passes_each_sources_page_and_returns_stable_source_ids ... ok
+test purify::tests::literal_dollars_disabled_rules_and_exact_scopes_are_respected ... ok
+test purify::tests::title_only_rules_do_not_change_content ... ok
+test purify::tests::zero_width_matches_and_full_deletion_have_valid_maps ... ok
+test query::tests::aggregation_normalizes_known_authors_but_does_not_merge_missing_or_different_authors ... ok
+test query::tests::cancel_and_unfinished_tasks_keep_their_page_and_successful_results ... ok
+test query::tests::independent_pages_retry_only_failed_sources_and_stop_repeated_pages ... ok
+test jobs::tests::shutdown_flushes_queued_progress_in_order ... ok
+test purify::tests::lookarounds_js_and_horizontal_spaces_preserve_unicode_positions ... ok
+test live::tests::source_picker_failure_and_cancel_preserve_reader_and_original_sidebar ... ok
+test reader::paging_tests::backward_paging_lands_on_previous_chapters_last_page ... ok
+test purify::tests::javascript_failures_and_loops_leave_entire_rule_unapplied ... ok
+test reader::paging_tests::final_partial_page_is_visible_before_next_chapter ... ok
+test reader::paging_tests::scrolling_crosses_chapters_but_never_wraps_book_bounds ... ok
+test reader::paging_tests::single_page_chapters_and_unrendered_reader_are_safe ... ok
+test reader::purification_tests::replacement_expansion_at_start_does_not_skip_first_displayed_lines ... ok
+test reader::real_tests::real_chapter_changes_wait_for_successful_load ... ok
+test reader::real_tests::character_progress_restores_after_width_change ... ok
+test sources::tests::enabling_explore_updates_sidebar_before_snapshot_returns ... ok
+test sources::tests::filter_multiselect_and_delete_use_stable_ids_and_require_confirmation ... ok
+test sources::tests::snapshots_preserve_focus_by_url_and_remove_stale_selections ... ok
+test reader::purification_tests::purified_pages_restore_original_offsets_when_rules_are_disabled_or_width_changes ... ok
+test live::tests::empty_live_pages_render_without_demo_sources_or_books ... ok
+test jobs::tests::shutdown_flushes_source_commit_and_reports_a_failed_commit ... ok
+test reader::purification_tests::imported_layout_renders_colors_indent_and_keeps_raw_titles ... ok
+test backend::tests::local_delete_removes_only_managed_copy_and_can_reimport ... ok
+test ui::home_layout_tests::home_logo_has_a_separate_wide_column_and_is_hidden_when_narrow ... ok
+test backend::tests::batch_source_changes_persist_and_preserve_books ... ok
+test library::tests::groups_rules_and_preferences_survive_restart_without_losing_book_progress ... ok
+test sources::tests::thousands_of_sources_keep_navigation_bounded_and_exploration_reachable ... ok
+test plugins::tests::http_import_limits_and_error_responses_are_checked ... ok
+test terminal_tests::caught_worker_panic_never_writes_terminal_controls ... ok
+test query::tests::limit_counts_candidates_not_just_merged_rows ... ok
+test plugins::tests::imports_merge_atomically_reload_and_reset_layout ... ok
+test backend::local_tests::txt_epub_import_reimport_and_restart_work_without_original_files ... ok
+test backend::tests::import_search_read_restart_and_offline_cache ... ok
+test backend::tests::paginated_queries_and_source_switch_preserve_shelf_and_restart_progress ... ok
+
+test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+
+   Doc-tests reader_rust
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

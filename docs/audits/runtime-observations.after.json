@@ -1,0 +1,118 @@
+{
+  "scope": "synthetic loopback probes; expected values from local Legado reference; not a live-source pass rate",
+  "observations": [
+    {
+      "probe": "normal_http_cookie_vs_js_http",
+      "normal_client": "cookie-present",
+      "js_client": {
+        "ok": true,
+        "value": "cookie-present"
+      },
+      "target": "The same source session must be available through both request paths."
+    },
+    {
+      "probe": "webview_request_dispatch",
+      "observed": {
+        "ok": false,
+        "error": "unsupported capability: WebView/browser JavaScript"
+      },
+      "target": "Execute browser JS or report an explicit unsupported capability instead of silent ordinary HTTP."
+    },
+    {
+      "probe": "rule_variable_roundtrip",
+      "expected": "stored-value",
+      "observed": {
+        "ok": true,
+        "value": "stored-value"
+      }
+    },
+    {
+      "probe": "get_string_binding",
+      "expected": "function",
+      "observed": {
+        "ok": true,
+        "value": "undefined"
+      }
+    },
+    {
+      "probe": "source_get_key_in_content_scope",
+      "expected": "source identity, not book identity",
+      "observed": "http://127.0.0.1:54710"
+    },
+    {
+      "probe": "ajax_singular_header_control",
+      "expected": "header-absent",
+      "observed": {
+        "ok": true,
+        "value": "header-absent"
+      }
+    },
+    {
+      "probe": "ajax_headers_object",
+      "expected": "header-present",
+      "observed": {
+        "ok": true,
+        "value": "header-present"
+      }
+    },
+    {
+      "probe": "ajax_headers_json_string",
+      "expected": "header-present",
+      "observed": {
+        "ok": true,
+        "value": "header-present"
+      }
+    },
+    {
+      "probe": "http_get_overload_and_response",
+      "expected": "response object with body() and supplied request headers",
+      "observed": {
+        "ok": true,
+        "value": "{\"kind\":\"object\",\"bodyMethod\":\"function\",\"body\":\"header-present\"}"
+      }
+    },
+    {
+      "probe": "post_response_body_method",
+      "expected": "fixture-ok",
+      "observed": {
+        "ok": true,
+        "value": "fixture-ok"
+      }
+    },
+    {
+      "probe": "cookie_get_after_http_set_cookie",
+      "expected": "cookie includes audit_session",
+      "observed": {
+        "ok": true,
+        "value": "audit_session=present"
+      }
+    },
+    {
+      "probe": "cookie_remove_affects_http",
+      "expected": "cookie-absent",
+      "observed": {
+        "ok": true,
+        "value": "cookie-absent"
+      }
+    },
+    {
+      "probe": "source_b_sees_source_a_http_cookie",
+      "expected": "cookie-absent under Tlegado source isolation",
+      "observed": {
+        "ok": true,
+        "value": "cookie-absent"
+      },
+      "originalSourceStillHasCookie": {
+        "ok": true,
+        "value": "cookie-present"
+      }
+    },
+    {
+      "probe": "missing_login_and_browser_bindings",
+      "observed": {
+        "ok": true,
+        "value": "{\"loginInfo\":\"undefined\",\"loginHeader\":\"function\",\"sourceVariable\":\"function\",\"browser\":\"undefined\",\"webView\":\"undefined\",\"connect\":\"function\"}"
+      }
+    }
+  ]
+}

@@ -20,6 +20,10 @@ use tokio::{
 };
 
 pub enum Command {
+    ExploreKinds {
+        id: u64,
+        source: reader_core::model::book_source::BookSource,
+    },
     ImportRules(String),
     ImportLayout(String),
     Query {
@@ -71,6 +75,11 @@ pub enum Command {
 }
 
 pub enum Event {
+    ExploreKinds {
+        id: u64,
+        source: String,
+        result: Result<Vec<reader_core::model::book_source::ExploreKind>, String>,
+    },
     Library(crate::library::Library),
     Snapshot(Snapshot),
     QueryPart {
@@ -168,6 +177,7 @@ async fn run(
     let _ = tx.send(Event::Library(backend.library().await?));
     let _ = tx.send(Event::Snapshot(backend.snapshot().await?));
     let query_generation = Arc::new(AtomicU64::new(0));
+    let category_generation = Arc::new(AtomicU64::new(0));
     let read_generation = Arc::new(AtomicU64::new(0));
     let permits = Arc::new(Semaphore::new(4));
     let mut tasks = JoinSet::new();
@@ -181,6 +191,29 @@ async fn run(
             }
         };
         match command {
+            Command::ExploreKinds { id, source } => {
+                category_generation.store(id, Ordering::SeqCst);
+                let generation = category_generation.clone();
+                let (books, tx, permits) = (backend.books.clone(), tx.clone(), permits.clone());
+                tasks.spawn(async move {
+                    let _permit = permits.acquire_owned().await.unwrap();
+                    if generation.load(Ordering::SeqCst) != id {
+                        return;
+                    }
+                    let key = source.book_source_url.clone();
+                    let result = tokio::task::spawn_blocking(move || books.explore_kinds(&source))
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result.map_err(|e| e.to_string()));
+                    if generation.load(Ordering::SeqCst) == id {
+                        let _ = tx.send(Event::ExploreKinds {
+                            id,
+                            source: key,
+                            result,
+                        });
+                    }
+                });
+            }
             Command::Query {
                 id,
                 requests,
@@ -319,6 +352,7 @@ async fn run(
                 });
             }
             Command::Cancel => {
+                category_generation.store(0, Ordering::SeqCst);
                 query_generation.store(0, Ordering::SeqCst);
                 read_generation.store(0, Ordering::SeqCst);
             }
@@ -536,6 +570,50 @@ mod tests {
             bridge.finish().is_err(),
             "exit must report an unacknowledged failed commit"
         );
+    }
+
+    #[test]
+    fn discovery_category_jobs_return_dynamic_results_and_errors() {
+        use reader_core::model::book_source::BookSource;
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = Bridge::start(temp.path().to_owned(), vec![]).unwrap();
+        for (id, script) in [
+            (41, "@js:[{title:'分类',url:'/books'}]"),
+            (42, "@js:throw Error('fixture failed')"),
+        ] {
+            let source = BookSource {
+                book_source_url: "https://fixture.invalid".into(),
+                explore_url: Some(script.into()),
+                ..Default::default()
+            };
+            bridge.send(Command::ExploreKinds { id, source }).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut received = false;
+            while !received && std::time::Instant::now() < deadline {
+                for event in bridge.poll() {
+                    if let Event::ExploreKinds {
+                        id: returned,
+                        source,
+                        result,
+                    } = event
+                    {
+                        assert_eq!(returned, id);
+                        assert_eq!(source, "https://fixture.invalid");
+                        if id == 41 {
+                            assert_eq!(result.unwrap()[0].title, "分类");
+                        } else {
+                            assert!(result.unwrap_err().contains("fixture failed"));
+                        }
+                        received = true;
+                    }
+                }
+                if !received {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            assert!(received, "category job timed out");
+        }
+        bridge.finish().unwrap();
     }
 
     #[test]

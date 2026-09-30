@@ -7,6 +7,8 @@ pub enum AppError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("source session: {0}")]
+    SourceSession(String),
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
     #[error("db error")]

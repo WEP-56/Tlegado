@@ -14,7 +14,7 @@ use crate::theme::{
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     text::{Line, Span},
-    widgets::{Paragraph, Widget},
+    widgets::{Paragraph, Widget, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -772,7 +772,7 @@ fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
         )),
         Some(Span::styled(
             if app.live.is_some() {
-                "enter 试读  a 加入  h/l 分类  n 续页  r 重试  s 书源"
+                "enter 试读  h/l 分类  n 续页  r 重试  R 刷新分类"
             } else {
                 "enter 试读  a 加入书架  h/l 分类  j/k 移动"
             },
@@ -840,6 +840,16 @@ fn draw_discover(f: &mut Frame, app: &App, area: Rect, source_idx: usize) {
     f.render_widget(Paragraph::new(header), body[1]);
 
     let list_area = body[2];
+    if list.is_empty() {
+        if let Some(live) = &app.live {
+            f.render_widget(
+                Paragraph::new(live.status.as_str())
+                    .style(s(THEME.dim))
+                    .wrap(Wrap { trim: false }),
+                list_area,
+            );
+        }
+    }
     let h = list_area.height as usize;
     let scroll = list_scroll(app.discover_sel, h, list.len());
     for (i, b) in list.iter().enumerate().skip(scroll) {

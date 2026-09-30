@@ -1,0 +1,8 @@
+   Compiling reader-rust v1.4.6 (E:\Tlegado\crates\legado-core)
+   Compiling tlegado v0.1.0 (E:\Tlegado)
+warning: due to multiple output types requested, the explicitly specified output file name will be adapted for each output type
+
+warning: ignoring --out-dir flag due to -o flag
+
+warning: `tlegado` (bin "tlegado") generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 31.63s
