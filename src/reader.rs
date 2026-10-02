@@ -28,6 +28,11 @@ pub struct Reader {
     lines: Vec<String>,
     width: u16,
     height: usize,
+    pending_join: Option<(u32, isize)>,
+    joined_scroll: isize,
+    horizontal_layout: bool,
+    auto_active: bool,
+    auto_elapsed_ms: u64,
 }
 
 struct RealText {
@@ -35,6 +40,14 @@ struct RealText {
     text: String,
     positions: Vec<usize>,
     restore: Option<usize>,
+    chapters: Vec<ChapterRange>,
+}
+
+struct ChapterRange {
+    index: u32,
+    start: usize,
+    body: usize,
+    end: usize,
 }
 
 pub fn chapter_title(index: u32) -> String {
@@ -73,6 +86,11 @@ impl Reader {
             lines: Vec::new(),
             width: 0,
             height: 1,
+            pending_join: None,
+            joined_scroll: 0,
+            horizontal_layout: false,
+            auto_active: false,
+            auto_elapsed_ms: 0,
         }
     }
 
@@ -82,7 +100,12 @@ impl Reader {
     }
 
     pub fn open_selected(&mut self) {
+        self.pending_join = None;
+        self.auto_elapsed_ms = 0;
         if self.real.is_some() {
+            if self.seamless() && self.jump_to_loaded(self.selected, false) {
+                return;
+            }
             self.request = Some((self.selected, false));
             return;
         }
@@ -103,7 +126,33 @@ impl Reader {
     }
 
     pub fn scroll(&mut self, delta: isize) {
-        if self.width == 0 || self.lines.is_empty() {
+        if self.is_horizontal() || self.width == 0 || self.lines.is_empty() {
+            return;
+        }
+        if self.seamless() && self.real.is_some() {
+            let real = self.real.as_ref().unwrap();
+            let target = if delta > 0 && self.offset == self.max_offset() {
+                real.chapters.last().map(|c| (c.index + 1, false))
+            } else if delta < 0 && self.offset == 0 {
+                real.chapters
+                    .first()
+                    .and_then(|c| c.index.checked_sub(1))
+                    .map(|i| (i, true))
+            } else {
+                None
+            };
+            if let Some((index, end)) = target {
+                if index < self.book.total {
+                    self.pending_join = Some((index, delta));
+                    self.request = Some((index, end));
+                }
+                return;
+            }
+            self.offset = self
+                .offset
+                .saturating_add_signed(delta)
+                .min(self.max_offset());
+            self.sync_chapter();
             return;
         }
         // Show the final partial page before a subsequent input crosses chapters.
@@ -127,16 +176,93 @@ impl Reader {
     }
 
     pub fn page(&mut self, forward: bool) {
-        let step = if self.options.0[4] == 1 {
-            1
-        } else {
-            self.height.max(1) as isize
-        };
+        if self.is_horizontal() {
+            self.horizontal_page(forward);
+            return;
+        }
+        let step = self.height.max(1) as isize;
         self.scroll(if forward { step } else { -step });
     }
 
+    pub fn is_horizontal(&self) -> bool {
+        self.options.0[4] == 1
+    }
+
+    pub fn auto_active(&self) -> bool {
+        self.auto_active
+    }
+
+    pub fn toggle_auto(&mut self) {
+        self.auto_active = !self.auto_active;
+        self.auto_elapsed_ms = 0;
+    }
+
+    pub fn auto_progress(&self) -> f64 {
+        let interval = self.auto_interval_ms();
+        (self.auto_elapsed_ms as f64 / interval as f64).clamp(0.0, 1.0)
+    }
+
+    pub fn auto_interval_ms(&self) -> u64 {
+        let index = if self.is_horizontal() { 11 } else { 10 };
+        [1_000, 2_000, 3_000, 5_000, 10_000][self.options.0.get(index).copied().unwrap_or(0).min(4)]
+    }
+
+    pub fn tick_auto(&mut self, elapsed_ms: u64) {
+        if !self.auto_active || self.request.is_some() {
+            return;
+        }
+        self.auto_elapsed_ms = self.auto_elapsed_ms.saturating_add(elapsed_ms);
+        let interval = self.auto_interval_ms();
+        if self.auto_elapsed_ms < interval {
+            return;
+        }
+        if self.width == 0 || self.lines.is_empty() {
+            return;
+        }
+        self.auto_elapsed_ms %= interval;
+        if self.is_horizontal() {
+            self.page(true);
+        } else {
+            self.scroll(1);
+        }
+    }
+
+    pub fn horizontal_arrow(&mut self, right: bool) {
+        if self.is_horizontal() {
+            self.page(right != (self.options.0[9] == 1));
+        }
+    }
+
+    fn horizontal_page(&mut self, forward: bool) {
+        if self.width == 0 || self.lines.is_empty() {
+            return;
+        }
+        if forward {
+            if self.offset == self.max_offset() {
+                self.change_chapter(1);
+            } else {
+                self.offset = (self.offset + self.height).min(self.max_offset());
+            }
+        } else if self.offset == 0 {
+            if self.chapter > 0 {
+                if self.real.is_some() {
+                    self.request = Some((self.chapter - 1, true));
+                    return;
+                }
+                self.change_chapter(-1);
+                self.offset = self.max_offset();
+            }
+        } else {
+            self.offset = self.offset.saturating_sub(self.height);
+        }
+    }
+
     pub fn max_offset(&self) -> usize {
-        self.lines.len().saturating_sub(self.height)
+        if self.is_horizontal() {
+            self.lines.len().saturating_sub(1) / self.height * self.height
+        } else {
+            self.lines.len().saturating_sub(self.height)
+        }
     }
 
     pub fn is_real(&self) -> bool {
@@ -165,9 +291,28 @@ impl Reader {
     }
 
     pub fn refresh_layout(&mut self) {
-        let position = self.position();
+        let position = self.absolute_position();
+        let local_position = self.position();
+        let horizontal = self.is_horizontal();
         if let Some(real) = &mut self.real {
-            real.restore = Some(position);
+            if horizontal {
+                if let Some(range) = real.chapters.iter().find(|c| c.index == self.chapter) {
+                    // Horizontal pages contain only the active chapter, without joined titles or neighbors.
+                    let length = range.end - range.body;
+                    real.text = real.text.chars().skip(range.body).take(length).collect();
+                    real.chapters = vec![ChapterRange {
+                        index: self.chapter,
+                        start: 0,
+                        body: 0,
+                        end: length,
+                    }];
+                }
+                real.restore = Some(local_position);
+                self.pending_join = None;
+                self.joined_scroll = 0;
+            } else {
+                real.restore = Some(position);
+            }
         }
         self.title_cache.get_mut().clear();
         self.width = 0;
@@ -175,30 +320,158 @@ impl Reader {
 
     pub fn set_real(&mut self, titles: Vec<String>, text: String, position: usize) {
         self.title_cache.get_mut().clear();
+        let length = text.chars().count();
+        let heading = if self.seamless() {
+            format!(
+                "【{}】\n",
+                titles
+                    .get(self.chapter as usize)
+                    .cloned()
+                    .unwrap_or_else(|| chapter_title(self.chapter))
+            )
+        } else {
+            String::new()
+        };
+        let body = heading.chars().count();
         self.real = Some(RealText {
             titles,
-            text,
+            text: format!("{heading}{text}"),
             positions: vec![],
-            restore: Some(position),
+            restore: Some(if position == 0 {
+                0
+            } else {
+                body + position.min(length)
+            }),
+            chapters: vec![ChapterRange {
+                index: self.chapter,
+                start: 0,
+                body,
+                end: body + length,
+            }],
         });
+        self.pending_join = None;
+        self.joined_scroll = 0;
         self.width = 0;
     }
 
     pub fn set_chapter(&mut self, index: u32, text: String, end: bool) {
+        self.auto_elapsed_ms = 0;
+        let position = self.absolute_position();
+        let pending = self
+            .pending_join
+            .take()
+            .filter(|(target, _)| *target == index);
+        let seamless = self.seamless();
+        if seamless && self.jump_to_loaded(index, end) {
+            return;
+        }
+        let heading = format!("【{}】\n", self.display_title(index));
         if let Some(real) = &mut self.real {
-            real.restore = Some(if end { text.chars().count() } else { 0 });
-            real.text = text;
+            let length = text.chars().count();
+            let heading_len = heading.chars().count();
+            let append = seamless && real.chapters.last().is_some_and(|c| c.index + 1 == index);
+            let prepend = seamless && real.chapters.first().is_some_and(|c| index + 1 == c.index);
+            if append || prepend {
+                let (start, body, target) = if append {
+                    let start = real.text.chars().count() + 1;
+                    real.text.push_str(&format!("\n{heading}{text}"));
+                    (start, start + heading_len, position)
+                } else {
+                    let prefix = format!("{heading}{text}\n");
+                    let shift = prefix.chars().count();
+                    for chapter in &mut real.chapters {
+                        chapter.start += shift;
+                        chapter.body += shift;
+                        chapter.end += shift;
+                    }
+                    real.text.insert_str(0, &prefix);
+                    (0, heading_len, position + shift)
+                };
+                let range = ChapterRange {
+                    index,
+                    start,
+                    body,
+                    end: body + length,
+                };
+                let jump = if end { range.end } else { range.start };
+                if append {
+                    real.chapters.push(range);
+                } else {
+                    real.chapters.insert(0, range);
+                }
+                // Automatic joins retain the viewport anchor; explicit chapter jumps land at the title.
+                real.restore = Some(if pending.is_some() { target } else { jump });
+                self.joined_scroll = pending.map_or(0, |(_, delta)| delta);
+                self.width = 0;
+                self.sync_chapter();
+                return;
+            }
+            let body = if seamless { heading_len } else { 0 };
+            real.restore = Some(if end { body + length } else { 0 });
+            real.text = if seamless {
+                format!("{heading}{text}")
+            } else {
+                text
+            };
             real.positions.clear();
+            real.chapters = vec![ChapterRange {
+                index,
+                start: 0,
+                body,
+                end: body + length,
+            }];
         }
         self.chapter = index;
         self.selected = index;
         self.offset = 0;
+        self.joined_scroll = 0;
         self.width = 0;
         self.lines.clear();
     }
 
+    fn seamless(&self) -> bool {
+        self.options.0[4] == 0 && self.options.0[8] == 1
+    }
+
+    fn jump_to_loaded(&mut self, index: u32, end: bool) -> bool {
+        let Some(real) = &mut self.real else {
+            return false;
+        };
+        let Some(range) = real.chapters.iter().find(|c| c.index == index) else {
+            return false;
+        };
+        real.restore = Some(if end { range.end } else { range.start });
+        self.chapter = index;
+        self.selected = index;
+        self.joined_scroll = 0;
+        self.width = 0;
+        true
+    }
+
+    fn sync_chapter(&mut self) {
+        let position = self.absolute_position();
+        if let Some(range) = self
+            .real
+            .as_ref()
+            .and_then(|r| r.chapters.iter().rev().find(|c| c.start <= position))
+        {
+            if self.chapter != range.index {
+                self.chapter = range.index;
+                self.selected = range.index;
+            }
+        }
+    }
+
     /// Tlegado stores a Unicode scalar offset here, never a terminal row number.
     pub fn position(&self) -> usize {
+        let position = self.absolute_position();
+        self.real
+            .as_ref()
+            .and_then(|r| r.chapters.iter().find(|c| c.index == self.chapter))
+            .map_or(0, |c| position.saturating_sub(c.body).min(c.end - c.body))
+    }
+
+    fn absolute_position(&self) -> usize {
         self.real
             .as_ref()
             .map(|r| {
@@ -212,7 +485,12 @@ impl Reader {
         if width == 0 || height == 0 {
             return;
         }
-        let position = self.position();
+        let horizontal = self.is_horizontal();
+        if horizontal != self.horizontal_layout {
+            self.refresh_layout();
+            self.horizontal_layout = horizontal;
+        }
+        let position = self.absolute_position();
         if let Some(real) = &mut self.real {
             self.height = height as usize;
             if self.width != width {
@@ -242,34 +520,51 @@ impl Reader {
                 let (display, mapping, errors) = crate::purify::apply_report(&real.text, rules);
                 self.purify_errors = errors;
                 for paragraph in display.split('\n') {
-                    let decorated = format!("{indent}{paragraph}");
+                    let heading = real
+                        .chapters
+                        .iter()
+                        .any(|c| c.body > c.start && mapping[base] == c.start);
+                    let paragraph_indent = if heading { "" } else { indent };
+                    if heading {
+                        for _ in 0..2 {
+                            real.positions.push(mapping[base]);
+                            self.lines.push(String::new());
+                        }
+                    }
+                    let decorated = format!("{paragraph_indent}{paragraph}");
                     let wrapped = wrap(&decorated, width as usize);
                     let mut used: usize = 0;
                     for line in wrapped {
                         real.positions.push(
                             mapping[base
                                 + used
-                                    .saturating_sub(indent.chars().count())
+                                    .saturating_sub(paragraph_indent.chars().count())
                                     .min(paragraph.chars().count())],
                         );
                         used += line.chars().count();
                         self.lines.push(line);
-                        for _ in 0..line_gap {
+                        for _ in 0..if heading { 0 } else { line_gap } {
                             real.positions.push(
                                 mapping[base
                                     + used
-                                        .saturating_sub(indent.chars().count())
+                                        .saturating_sub(paragraph_indent.chars().count())
                                         .min(paragraph.chars().count())],
                             );
                             self.lines.push(String::new());
                         }
                     }
-                    for _ in 0..paragraph_gap {
+                    for _ in 0..if heading { 2 } else { paragraph_gap } {
                         real.positions
                             .push(mapping[base + paragraph.chars().count()]);
                         self.lines.push(String::new());
                     }
                     base += paragraph.chars().count() + 1;
+                }
+                if horizontal {
+                    while self.lines.last().is_some_and(String::is_empty) {
+                        self.lines.pop();
+                        real.positions.pop();
+                    }
                 }
                 let next = real.positions.partition_point(|p| *p < position);
                 self.offset = if real.positions.get(next) == Some(&position) {
@@ -281,6 +576,14 @@ impl Reader {
                 self.width = width;
             }
             self.offset = self.offset.min(self.max_offset());
+            self.offset = self
+                .offset
+                .saturating_add_signed(std::mem::take(&mut self.joined_scroll))
+                .min(self.max_offset());
+            if horizontal {
+                self.offset = self.offset / self.height * self.height;
+            }
+            self.sync_chapter();
             return;
         }
         if self.width != width {
@@ -314,8 +617,16 @@ impl Reader {
             }
             self.width = width;
         }
+        if horizontal {
+            while self.lines.last().is_some_and(String::is_empty) {
+                self.lines.pop();
+            }
+        }
         self.height = height as usize;
         self.offset = self.offset.min(self.max_offset());
+        if horizontal {
+            self.offset = self.offset / self.height * self.height;
+        }
     }
 }
 
@@ -382,6 +693,181 @@ mod real_tests {
         reader.page(false);
         assert_eq!(reader.request, Some((0, true)));
         assert_eq!(reader.chapter, 1);
+    }
+
+    fn seamless_reader(index: u32) -> Reader {
+        let mut reader = reader();
+        reader.chapter = index;
+        reader.book.total = 4;
+        reader.options.0[8] = 1;
+        reader.set_real(
+            vec![
+                "第一章".into(),
+                "第二章".into(),
+                "第三章".into(),
+                "第四章".into(),
+            ],
+            format!("第{index}章正文").repeat(150),
+            0,
+        );
+        reader.prepare(44, 12);
+        reader
+    }
+
+    #[test]
+    fn seamless_explicit_next_chapter_lands_at_title_instead_of_end() {
+        let mut reader = seamless_reader(0);
+        reader.change_chapter(1);
+        reader.set_chapter(1, "第二章开头正文".repeat(150), false);
+        reader.prepare(44, 12);
+        assert_eq!(reader.chapter, 1);
+        assert_eq!(reader.position(), 0);
+        assert!(reader.lines[reader.offset + 2].contains("【第二章】"));
+        assert!(reader.offset < reader.max_offset());
+        assert!(reader.lines.join("").contains("第0章正文"));
+    }
+
+    #[test]
+    fn seamless_append_continues_one_row_and_can_scroll_back_without_reloading() {
+        let mut reader = seamless_reader(0);
+        reader.offset = reader.max_offset();
+        let offset = reader.offset;
+        reader.scroll(1);
+        assert_eq!(reader.request.take(), Some((1, false)));
+        reader.set_chapter(1, "第二章正文".repeat(150), false);
+        reader.prepare(44, 12);
+        assert_eq!(reader.offset, offset + 1);
+        assert!(reader.offset < reader.max_offset());
+        let title = reader
+            .lines
+            .iter()
+            .position(|l| l.contains("【第二章】"))
+            .unwrap();
+        assert!(title >= reader.offset);
+        reader.scroll(2);
+        assert!(title < reader.offset + reader.height);
+        reader.offset = title;
+        reader.prepare(44, 12);
+        assert_eq!((reader.chapter, reader.position()), (1, 0));
+        reader.scroll(-3);
+        assert_eq!(reader.chapter, 0);
+        assert!(reader.request.is_none());
+        reader.offset = reader.max_offset();
+        reader.prepare(44, 12);
+        reader.scroll(1);
+        assert_eq!(reader.request, Some((2, false)));
+    }
+
+    #[test]
+    fn seamless_prepend_preserves_anchor_and_correct_title_order() {
+        let mut reader = seamless_reader(1);
+        let old_view = reader.lines[..reader.height].to_vec();
+        reader.scroll(-1);
+        assert_eq!(reader.request.take(), Some((0, true)));
+        reader.set_chapter(0, "第一章正文".repeat(150), true);
+        reader.prepare(44, 12);
+        assert_eq!(
+            reader.lines[reader.offset + 1..reader.offset + 1 + reader.height],
+            old_view
+        );
+        let text = reader.lines.join("");
+        assert!(text.find("【第一章】").unwrap() < text.find("第一章正文").unwrap());
+        assert!(text.find("第一章正文").unwrap() < text.find("【第二章】").unwrap());
+        assert_eq!(text.matches("【第一章】").count(), 1);
+        reader.scroll(1);
+        assert_eq!((reader.chapter, reader.position()), (1, 0));
+        assert!(reader.request.is_none());
+    }
+
+    #[test]
+    fn seamless_progress_is_chapter_local_after_resize_and_reopen() {
+        let mut reader = seamless_reader(0);
+        let text = "第二章😀正文内容。".repeat(200);
+        reader.set_chapter(1, text.clone(), false);
+        reader.prepare(44, 12);
+        reader.page(true);
+        let position = reader.position();
+        assert!(position > 0 && position < text.chars().count());
+        reader.prepare(28, 12);
+        assert_eq!(reader.chapter, 1);
+        assert!(reader.position().abs_diff(position) < 28);
+        reader.refresh_layout();
+        reader.prepare(28, 12);
+        assert_eq!(reader.chapter, 1);
+        let position = reader.position();
+        let mut reopened = seamless_reader(1);
+        reopened.set_real(reader.real.as_ref().unwrap().titles.clone(), text, position);
+        reopened.prepare(28, 12);
+        assert_eq!(reopened.position(), position);
+        assert_eq!(reopened.lines[reopened.offset], reader.lines[reader.offset]);
+    }
+
+    #[test]
+    fn seamless_loaded_chapter_jump_does_not_duplicate_content() {
+        let mut reader = seamless_reader(0);
+        reader.set_chapter(1, "第二章正文".repeat(100), false);
+        reader.prepare(44, 12);
+        let text = reader.real.as_ref().unwrap().text.clone();
+        reader.selected = 0;
+        reader.open_selected();
+        reader.prepare(44, 12);
+        reader.selected = 1;
+        reader.open_selected();
+        reader.prepare(44, 12);
+        assert!(reader.request.is_none());
+        assert_eq!(reader.real.as_ref().unwrap().text, text);
+        assert_eq!((reader.chapter, reader.position()), (1, 0));
+        reader.set_chapter(3, "第四章正文".repeat(100), false);
+        reader.prepare(44, 12);
+        assert_eq!(reader.chapter, 3);
+        assert!(!reader.real.as_ref().unwrap().text.contains("第二章正文"));
+    }
+
+    #[test]
+    fn horizontal_mode_does_not_join_chapters() {
+        let mut reader = seamless_reader(0);
+        reader.options.0[4] = 1;
+        reader.set_chapter(1, "第二章正文".repeat(100), false);
+        reader.prepare(44, 12);
+        assert_eq!(reader.chapter, 1);
+        assert!(!reader.real.as_ref().unwrap().text.contains("第0章正文"));
+    }
+
+    #[test]
+    fn seamless_titles_have_spacing_and_centered_emphasis_at_different_widths() {
+        use ratatui::{backend::TestBackend, style::Modifier, Terminal};
+        let mut reader = seamless_reader(0);
+        reader.layout = Some(
+            crate::plugins::parse_layout(
+                r#"{"paragraphIndent":"--","lineSpacingExtra":0,"paragraphSpacing":0}"#,
+            )
+            .unwrap(),
+        );
+        reader.refresh_layout();
+        for (width, height) in [(120, 30), (80, 24), (36, 16)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|f| draw_page(f, &mut reader, f.area(), true))
+                .unwrap();
+            assert!(reader.lines[0..2].iter().all(String::is_empty));
+            assert_eq!(reader.lines[2], "【第一章】");
+            assert!(reader.lines[3..5].iter().all(String::is_empty));
+            assert!(reader.lines[5].starts_with("--"));
+            let buffer = terminal.backend().buffer();
+            let (column, row) = (0..height)
+                .find_map(|y| {
+                    (0..width)
+                        .find(|&x| buffer[(x, y)].symbol() == "【")
+                        .map(|x| (x, y))
+                })
+                .unwrap();
+            let cell = &buffer[(column, row)];
+            assert!(cell
+                .modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED));
+            assert!(column > width / 4 && column < width / 2);
+            assert_eq!((reader.chapter, reader.position()), (0, 0));
+        }
     }
 }
 
@@ -507,9 +993,28 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
     let lines: Vec<Line> = reader
         .lines
         .iter()
+        .enumerate()
         .skip(reader.offset)
         .take(content.height as usize)
-        .map(|line| Line::from(line.as_str()))
+        .map(|(row, line)| {
+            let heading = !line.is_empty()
+                && reader.real.as_ref().is_some_and(|real| {
+                    real.positions.get(row).is_some_and(|position| {
+                        real.chapters
+                            .iter()
+                            .any(|c| c.body > c.start && *position >= c.start && *position < c.body)
+                    })
+                });
+            if heading {
+                Line::from(line.as_str()).centered().style(
+                    ratatui::style::Style::default().add_modifier(
+                        ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED,
+                    ),
+                )
+            } else {
+                Line::from(line.as_str())
+            }
+        })
         .collect();
     use ratatui::style::{Color, Style};
     let (mut bg, mut fg) = match reader.options.0[0] {
@@ -536,10 +1041,23 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
     let at_end = reader.offset == reader.max_offset();
     // The preference hides routine page progress, while chapter boundaries
     // remain visible so automatic chapter changes are never ambiguous.
-    if reader.options.0[5] == 1 && !at_end {
+    if reader.options.0[5] == 1 && !at_end && !reader.auto_active() {
         return;
     }
-    let status = if at_end {
+    let status = if at_end && reader.is_horizontal() {
+        format!(
+            "第 {}/{} · {}/{} 页 · {}",
+            reader.chapter + 1,
+            reader.book.total,
+            page,
+            pages,
+            if reader.chapter + 1 < reader.book.total {
+                "本章完"
+            } else {
+                "全书完"
+            },
+        )
+    } else if at_end {
         if reader.chapter + 1 < reader.book.total {
             format!(
                 "╰─ 本章完 · ] 下一章 · 第 {}/{} ─╯",
@@ -570,6 +1088,25 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
             pages
         )
     };
+    let status = if reader.auto_active() {
+        let width = 16usize;
+        let filled = (reader.auto_progress() * width as f64).round() as usize;
+        let bar = format!(
+            "{}{}",
+            "━".repeat(filled.min(width)),
+            "·".repeat(width.saturating_sub(filled))
+        );
+        format!(
+            "▶ {bar} 自动{} · {status}",
+            if reader.is_horizontal() {
+                "翻页"
+            } else {
+                "滚动"
+            }
+        )
+    } else {
+        status
+    };
     f.render_widget(
         Paragraph::new(status)
             .style(if at_end {
@@ -580,6 +1117,257 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
             .centered(),
         Rect::new(x, inner.bottom() - 1, width, 1),
     );
+}
+
+#[cfg(test)]
+mod horizontal_tests {
+    use super::*;
+
+    fn reader(text: &str, width: u16, height: u16) -> Reader {
+        let mut book = crate::data::shelf().remove(0);
+        book.read = 0;
+        book.total = 3;
+        let mut reader = Reader::new(book, false);
+        reader.options.0[4] = 1;
+        reader.options.0[8] = 1;
+        reader.layout = Some(
+            crate::plugins::parse_layout(
+                r#"{"paragraphIndent":"","lineSpacingExtra":0,"paragraphSpacing":0}"#,
+            )
+            .unwrap(),
+        );
+        reader.set_real(
+            vec!["第一章".into(), "第二章".into(), "第三章".into()],
+            text.into(),
+            0,
+        );
+        reader.prepare(width, height);
+        reader
+    }
+
+    #[test]
+    fn every_page_contains_complete_unicode_text_without_overlap_or_loss() {
+        let raw = "A中😀e\u{301}B".repeat(83);
+        for width in [8, 17, 44] {
+            for height in [1, 3, 10] {
+                let mut reader = reader(&raw, width, height);
+                let pages = reader.lines.len().div_ceil(height as usize);
+                assert_eq!(reader.max_offset(), (pages - 1) * height as usize);
+                let mut displayed = String::new();
+                for page in 0..pages {
+                    assert_eq!(reader.offset, page * height as usize);
+                    for line in reader
+                        .lines
+                        .iter()
+                        .skip(reader.offset)
+                        .take(height as usize)
+                    {
+                        assert!(
+                            unicode_width::UnicodeWidthStr::width(line.as_str()) <= width as usize
+                        );
+                        displayed.push_str(line);
+                    }
+                    assert!(reader.request.is_none());
+                    if page + 1 < pages {
+                        reader.page(true);
+                    }
+                }
+                assert_eq!(displayed, raw);
+                for page in (0..pages.saturating_sub(1)).rev() {
+                    reader.page(false);
+                    assert_eq!(reader.offset, page * height as usize);
+                }
+                assert!(reader.request.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn exact_and_partial_pages_do_not_create_blank_pages() {
+        for (length, pages) in [(0, 1), (1, 1), (39, 1), (40, 1), (41, 2), (80, 2), (81, 3)] {
+            let raw = "a".repeat(length);
+            let mut reader = reader(&raw, 10, 4);
+            reader.layout = None;
+            reader.options.0[3] = 0;
+            reader.refresh_layout();
+            reader.prepare(10, 4);
+            assert_eq!(reader.lines.len().div_ceil(4).max(1), pages);
+            assert_eq!(reader.max_offset(), (pages - 1) * 4);
+            assert_eq!(reader.lines.join(""), raw);
+        }
+    }
+
+    #[test]
+    fn arrows_respect_direction_but_logical_next_page_is_always_forward() {
+        for direction in [0, 1] {
+            let mut reader = reader(&"正文内容。".repeat(150), 20, 5);
+            reader.options.0[9] = direction;
+            reader.page(true);
+            assert_eq!(reader.offset, 5);
+            reader.horizontal_arrow(direction == 0);
+            assert_eq!(reader.offset, 10);
+            reader.horizontal_arrow(direction != 0);
+            assert_eq!(reader.offset, 5);
+            reader.page(false);
+            assert_eq!(reader.offset, 0);
+            reader.page(false);
+            assert_eq!(reader.chapter, 0);
+            assert!(reader.request.is_none());
+            reader.scroll(1);
+            reader.scroll(-1);
+            assert_eq!(reader.offset, 0);
+        }
+    }
+
+    #[test]
+    fn chapter_navigation_waits_for_load_and_previous_chapter_opens_last_page() {
+        let mut reader = reader(&"一".repeat(153), 20, 5);
+        reader.offset = reader.max_offset();
+        let last = reader.offset;
+        reader.page(true);
+        assert_eq!(reader.request.take(), Some((1, false)));
+        assert_eq!((reader.chapter, reader.offset), (0, last));
+        reader.set_chapter(1, "二".repeat(71), false);
+        reader.prepare(20, 5);
+        assert_eq!((reader.chapter, reader.offset), (1, 0));
+        assert_eq!(reader.lines.join(""), "二".repeat(71));
+        reader.page(false);
+        assert_eq!(reader.request.take(), Some((0, true)));
+        assert_eq!((reader.chapter, reader.offset), (1, 0));
+        reader.set_chapter(0, "一".repeat(153), true);
+        reader.prepare(20, 5);
+        assert_eq!((reader.chapter, reader.offset), (0, reader.max_offset()));
+        assert_eq!(reader.offset % 5, 0);
+        assert_eq!(reader.lines.join(""), "一".repeat(153));
+    }
+
+    #[test]
+    fn resize_and_restart_keep_the_saved_character_on_the_visible_page() {
+        let raw = "中😀English正文内容。".repeat(200);
+        let mut reader = reader(&raw, 44, 12);
+        reader.page(true);
+        reader.page(true);
+        for (width, height) in [(28, 12), (28, 5), (60, 9), (17, 3)] {
+            let position = reader.position();
+            reader.prepare(width, height);
+            let start = reader.position();
+            let end = reader
+                .real
+                .as_ref()
+                .unwrap()
+                .positions
+                .get(reader.offset + height as usize)
+                .copied()
+                .unwrap_or(raw.chars().count());
+            assert!(start <= position && position <= end);
+            assert_eq!(reader.offset % height as usize, 0);
+            assert!(reader.request.is_none());
+            let mut restored = self::reader(&raw, width, height);
+            restored.set_real(
+                reader.real.as_ref().unwrap().titles.clone(),
+                raw.clone(),
+                start,
+            );
+            restored.prepare(width, height);
+            assert_eq!(restored.offset, reader.offset);
+            assert_eq!(restored.position(), start);
+        }
+    }
+
+    #[test]
+    fn switching_from_joined_vertical_text_keeps_only_the_current_chapter() {
+        let mut reader = reader(&"第一章正文".repeat(150), 20, 5);
+        reader.options.0[4] = 0;
+        reader.set_real(
+            vec!["第一章".into(), "第二章".into()],
+            "第一章正文".repeat(150),
+            0,
+        );
+        reader.prepare(20, 5);
+        reader.set_chapter(1, "第二章正文".repeat(150), false);
+        reader.prepare(20, 5);
+        reader.page(true);
+        let position = reader.position();
+        reader.options.0[4] = 1;
+        reader.prepare(20, 5);
+        assert_eq!(reader.chapter, 1);
+        assert_eq!(reader.lines.join(""), "第二章正文".repeat(150));
+        assert_eq!(reader.real.as_ref().unwrap().chapters.len(), 1);
+        assert!(reader.position() <= position);
+        let offset = reader.offset;
+        reader.scroll(1);
+        assert_eq!(reader.offset, offset);
+    }
+
+    #[test]
+    fn demo_previous_chapter_lands_on_a_complete_last_page() {
+        let mut book = crate::data::shelf().remove(0);
+        book.read = 1;
+        book.total = 3;
+        let mut reader = Reader::new(book, false);
+        reader.options.0[4] = 1;
+        reader.prepare(28, 7);
+        reader.page(false);
+        assert_eq!(reader.chapter, 0);
+        assert_eq!(reader.offset, reader.max_offset());
+        assert_eq!(reader.offset % 7, 0);
+        reader.page(true);
+        assert_eq!((reader.chapter, reader.offset), (1, 0));
+    }
+
+    #[test]
+    fn rendered_pages_have_correct_counts_and_show_the_final_text() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let raw = format!("{}THEEND", "中😀abc".repeat(251));
+        for (width, height) in [(80, 20), (36, 12)] {
+            let mut reader = reader(&raw, 20, 5);
+            reader.options.0[1] = 0;
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut displayed = String::new();
+            let mut page = 0;
+            loop {
+                terminal
+                    .draw(|f| draw_page(f, &mut reader, f.area(), true))
+                    .unwrap();
+                let pages = reader.lines.len().div_ceil(reader.height);
+                let buffer = terminal.backend().buffer();
+                let mut status = String::new();
+                for x in 0..width {
+                    status.push_str(buffer[(x, height - 2)].symbol());
+                }
+                assert!(status.contains(&format!("{}/{pages} 页", page + 1)));
+                for y in 2..height - 2 {
+                    let mut line = String::new();
+                    let content_x = (width - reader.width) / 2;
+                    let mut x = content_x;
+                    while x < content_x + reader.width {
+                        let symbol = buffer[(x, y)].symbol();
+                        line.push_str(symbol);
+                        x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+                    }
+                    displayed.push_str(line.trim());
+                }
+                page += 1;
+                if page == pages {
+                    break;
+                }
+                reader.page(true);
+            }
+            assert_eq!(displayed, raw);
+        }
+    }
+
+    #[test]
+    fn auto_tick_uses_page_interval_for_horizontal_mode() {
+        let mut reader = reader(&"正文".repeat(300), 20, 5);
+        reader.options.0[10] = 4;
+        reader.options.0[11] = 0;
+        reader.toggle_auto();
+        reader.tick_auto(999);
+        assert_eq!(reader.offset, 0);
+        reader.tick_auto(1);
+        assert_eq!(reader.offset, 5);
+    }
 }
 
 #[cfg(test)]

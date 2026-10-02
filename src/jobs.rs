@@ -53,6 +53,10 @@ pub enum Command {
         index: usize,
         end: bool,
     },
+    Prefetch {
+        book: Book,
+        chapter: BookChapter,
+    },
     Cancel,
     Import(PathBuf),
     ImportLocal(PathBuf),
@@ -349,6 +353,14 @@ async fn run(
                             result,
                         });
                     }
+                });
+            }
+            Command::Prefetch { book, chapter } => {
+                let b = backend.clone();
+                let permits = permits.clone();
+                tasks.spawn(async move {
+                    let _permit = permits.acquire_owned().await.unwrap();
+                    let _ = b.chapter(&book, &chapter).await;
                 });
             }
             Command::Cancel => {

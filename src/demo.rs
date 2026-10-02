@@ -45,20 +45,48 @@ impl Check {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Prefs(pub [usize; 7]);
+pub struct Prefs(pub Vec<usize>);
 impl Default for Prefs {
     fn default() -> Self {
-        Self([0, 2, 0, 1, 0, 0, 0])
+        Self(vec![0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0])
     }
 }
-pub const PREFS: [(&str, &[&str]); 7] = [
+impl Prefs {
+    pub fn enabled(&self, index: usize) -> bool {
+        match index {
+            8 => self.0[4] == 0,
+            9 => self.0[4] == 1,
+            _ => true,
+        }
+    }
+
+    pub fn normalize(mut values: Vec<usize>) -> Self {
+        let defaults = Self::default().0;
+        if values.len() < defaults.len() {
+            values.extend(defaults[values.len()..].iter().copied());
+        }
+        values.truncate(defaults.len());
+        Self(values)
+    }
+}
+pub const PREFS: [(&str, &[&str]); 12] = [
     ("配色主题", &["终端默认", "护眼绿", "羊皮纸", "高对比"]),
     ("正文行宽", &["自适应", "28 字", "36 字", "44 字"]),
     ("行间空行", &["0", "1"]),
     ("段首缩进", &["0 字", "2 字"]),
-    ("翻页方式", &["整页", "逐行"]),
+    ("翻页方式", &["竖向", "横向"]),
     ("进度显示", &["开", "关"]),
     ("正文净化", &["开", "关"]),
+    (
+        "预缓存章节",
+        &[
+            "关闭", "1章", "2章", "3章", "4章", "5章", "6章", "7章", "8章", "9章", "10章",
+        ],
+    ),
+    ("章节切换", &["普通", "无缝滚动"]),
+    ("横向方向", &["从左到右", "从右到左"]),
+    ("自动滚动时间", &["1 秒", "2 秒", "3 秒", "5 秒", "10 秒"]),
+    ("自动翻页时间", &["1 秒", "2 秒", "3 秒", "5 秒", "10 秒"]),
 ];
 pub struct Demo {
     pub history: Vec<History>,
@@ -265,6 +293,9 @@ impl App {
                     return;
                 }
                 let i = self.demo.pref_sel;
+                if !self.demo.prefs.enabled(i) && code != KeyCode::Char('R') {
+                    return;
+                }
                 let n = PREFS[i].1.len();
                 match code {
                     KeyCode::Left | KeyCode::Char('h') => {
@@ -644,7 +675,13 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     format!(
                         "{} ‹{}›",
                         pad(name, 14),
-                        if active {
+                        if !app.demo.prefs.enabled(i) {
+                            if i == 8 {
+                                "仅竖向"
+                            } else {
+                                "仅横向"
+                            }
+                        } else if active {
                             "导入配置"
                         } else {
                             options[app.demo.prefs.0[i]]
@@ -690,6 +727,32 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crossterm::event::KeyCode;
+
+    #[test]
+    fn preferences_disable_options_for_the_other_paging_mode() {
+        let mut app = App::new();
+        app.goto_id_for_test("set:prefs");
+        app.demo.pref_sel = 8;
+        app.demo_key(KeyCode::Right);
+        assert_eq!(app.demo.prefs.0[8], 1);
+        app.demo.pref_sel = 4;
+        app.demo_key(KeyCode::Right);
+        app.demo.pref_sel = 8;
+        app.demo_key(KeyCode::Right);
+        assert_eq!(app.demo.prefs.0[8], 1);
+        assert!(!app.demo.prefs.enabled(8));
+        app.demo.pref_sel = 9;
+        app.demo_key(KeyCode::Right);
+        assert_eq!(app.demo.prefs.0[9], 1);
+        app.demo.pref_sel = 4;
+        app.demo_key(KeyCode::Left);
+        app.demo.pref_sel = 9;
+        app.demo_key(KeyCode::Right);
+        assert_eq!(app.demo.prefs.0[9], 1);
+        assert!(!app.demo.prefs.enabled(9));
+        app.demo_key(KeyCode::Char('R'));
+        assert_eq!(app.demo.prefs, Prefs::default());
+    }
 
     #[test]
     fn history_records_reader_progress_and_can_restore() {

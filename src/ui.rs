@@ -23,6 +23,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     // 整屏铺底，避免默认色漏边
     fill_bg(area, f.buffer_mut());
+    if app.boss_mode {
+        draw_boss_terminal(f, app, area);
+        return;
+    }
 
     // 状态栏各占一行；只在较高终端保留一行顶部呼吸空间。
     let chunks = Layout::default()
@@ -83,11 +87,119 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         {
             crate::sources::draw_help(f, area);
         } else if app.reader.is_some() {
-            draw_reader_help(f, area, app.live.is_some());
+            draw_reader_help(
+                f,
+                area,
+                app.live.is_some(),
+                app.reader.as_ref().unwrap().is_horizontal(),
+            );
         } else {
             draw_help(f, area, app.live.is_some());
         }
     }
+}
+
+fn draw_boss_terminal(f: &mut Frame, app: &App, area: Rect) {
+    use ratatui::style::{Color, Style};
+    let bg = Color::Rgb(8, 12, 18);
+    let fg = Color::Rgb(177, 213, 191);
+    let accent = Color::Rgb(105, 190, 155);
+    let dim = Color::Rgb(94, 119, 107);
+    let pulse = ["·", "··", "···", "··", "·"][app.tick as usize % 5];
+    let uptime = app.tick / 10;
+    let mut lines = vec![
+        (
+            "workstation@terminal:~$ htop --user-session".to_string(),
+            accent,
+        ),
+        (
+            "Linux workstation 6.8.0-generic   x86_64   pts/2".to_string(),
+            dim,
+        ),
+        (
+            format!(
+                " uptime {:02}:{:02}:{:02}   load 0.42  0.37  0.31",
+                uptime / 3600,
+                uptime / 60 % 60,
+                uptime % 60
+            ),
+            dim,
+        ),
+        ("".into(), fg),
+        (
+            " PID   USER       CPU   MEM   STATE       COMMAND".into(),
+            accent,
+        ),
+        (
+            " 1842  reader     1.2%  0.8%  sleeping    index-worker".into(),
+            fg,
+        ),
+        (
+            " 2197  reader     0.4%  0.3%  running     sync-agent".into(),
+            fg,
+        ),
+        (
+            " 2310  reader     0.1%  0.2%  waiting     cache-refresh".into(),
+            fg,
+        ),
+        ("".into(), fg),
+        (
+            format!(
+                "[{}] sync workspace metadata",
+                if app.tick % 17 < 15 { "ok" } else { ".." }
+            ),
+            fg,
+        ),
+        (
+            format!(
+                "[ok] checkpoint journal {:04} entries",
+                1200 + app.tick as usize % 97
+            ),
+            fg,
+        ),
+        (format!("[ok] background queue{} 4 tasks", pulse), fg),
+        ("[ok] file watcher: 0 pending changes".into(), fg),
+        ("[info] no interactive input required".into(), dim),
+        ("".into(), fg),
+        (
+            "workstation@terminal:~$ tail -f /var/log/workstation.log".into(),
+            accent,
+        ),
+        (
+            format!(
+                "{} INFO worker heartbeat: scheduler cycle {}",
+                pulse, app.tick
+            ),
+            fg,
+        ),
+        (
+            format!(
+                "{} INFO cache index stable; next scan in {}s",
+                pulse,
+                30 - app.tick as usize % 30
+            ),
+            fg,
+        ),
+        (
+            format!(
+                "{} INFO session metrics: {} samples collected",
+                pulse,
+                80 + app.tick as usize % 20
+            ),
+            fg,
+        ),
+        ("".into(), fg),
+        ("workstation@terminal:~$ _".into(), accent),
+    ];
+    lines.truncate(area.height.saturating_sub(1) as usize);
+    let body = lines
+        .into_iter()
+        .map(|(line, color)| Line::from(Span::styled(line, Style::default().fg(color))))
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(body).style(Style::default().bg(bg).fg(fg)),
+        area,
+    );
 }
 
 fn inset(r: Rect, x: u16, y: u16) -> Rect {
@@ -260,8 +372,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     } else if app.reader.is_some() {
         hints(&[
             ("tab", "目录"),
-            ("j/k", "滚动"),
+            if app.reader.as_ref().unwrap().is_horizontal() {
+                ("h/l", "翻页")
+            } else {
+                ("j/k", "滚动")
+            },
             ("space", "翻页"),
+            ("A", "自动阅读"),
             ("s", "换源"),
             ("a", "加入书架"),
             ("q", "返回"),
@@ -1172,7 +1289,7 @@ fn draw_help(f: &mut Frame, area: Rect, live: bool) {
     f.render_widget(Paragraph::new(lines), inset(inner, 2, 1));
 }
 
-fn draw_reader_help(f: &mut Frame, area: Rect, live: bool) {
+fn draw_reader_help(f: &mut Frame, area: Rect, live: bool, horizontal: bool) {
     let r = center_rect(area, 68, 19);
     ratatui::widgets::Clear.render(r, f.buffer_mut());
     let block = panel(
@@ -1185,8 +1302,13 @@ fn draw_reader_help(f: &mut Frame, area: Rect, live: bool) {
     let lines = [
         "Tab       章节目录 ⇄ 正文",
         "目录 j/k  上下选择；Enter 打开章节",
-        "正文 j/k  逐行滚动",
+        if horizontal {
+            "正文 ←/→  或 h/l 整页翻页（按横向方向设置）"
+        } else {
+            "正文 j/k  逐行滚动"
+        },
         "Space     下一页；PgUp/PgDn 翻页（到边界自动切章）",
+        "A         自动滚动/翻页启停；底部进度条显示下一次动作",
         "[ / ]     上一章 / 下一章",
         "g / G     目录首尾 / 正文首尾",
         "t         聚焦当前章节目录",

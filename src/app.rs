@@ -66,6 +66,7 @@ pub struct App {
     pub search_input_mode: bool, // true = 正在输入
 
     pub help: bool,
+    pub boss_mode: bool,
     pub toast: Option<(String, ToastTone, u8)>, // msg, tone, ticks left
     pub tick: u64,
     pub should_quit: bool,
@@ -105,6 +106,7 @@ impl App {
             search_query: String::new(),
             search_input_mode: false,
             help: false,
+            boss_mode: false,
             toast: None,
             tick: 0,
             should_quit: false,
@@ -277,6 +279,11 @@ impl App {
             self.demo.tick(&self.sources);
         }
         self.tick = self.tick.wrapping_add(1);
+        if !self.boss_mode {
+            if let Some(reader) = &mut self.reader {
+                reader.tick_auto(100);
+            }
+        }
         if let Some((_, _, ref mut left)) = self.toast {
             *left = left.saturating_sub(1);
             if *left == 0 {
@@ -287,6 +294,18 @@ impl App {
 
     // ── 按键 ────────────────────────────────────────────────
     pub fn on_key(&mut self, key: KeyEvent) {
+        // Most terminals encode Ctrl+Shift+Q as Ctrl+Q and omit the Shift bit.
+        // Accept both encodings so the boss key works across terminal emulators.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('q' | 'Q'))
+        {
+            self.boss_mode = !self.boss_mode;
+            self.help = false;
+            return;
+        }
+        if self.boss_mode {
+            return;
+        }
         if self.live_key(key) {
             return;
         }
@@ -697,6 +716,7 @@ impl App {
         let reader = self.reader.as_mut().expect("active reader");
         match key.code {
             KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('A') => reader.toggle_auto(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.sidebar_hidden || self.focus == Focus::Sidebar {
                     Focus::Main
@@ -728,6 +748,8 @@ impl App {
             },
             KeyCode::Char('j') | KeyCode::Down => reader.scroll(1),
             KeyCode::Char('k') | KeyCode::Up => reader.scroll(-1),
+            KeyCode::Left | KeyCode::Char('h') => reader.horizontal_arrow(false),
+            KeyCode::Right | KeyCode::Char('l') => reader.horizontal_arrow(true),
             KeyCode::Char(' ') | KeyCode::PageDown => reader.page(true),
             KeyCode::PageUp => reader.page(false),
             KeyCode::Char('g') | KeyCode::Home => reader.offset = 0,
@@ -973,5 +995,100 @@ mod reader_tests {
         book.total = 0;
         app.open_reader(book);
         assert!(app.reader.is_none());
+    }
+
+    #[test]
+    fn ctrl_shift_q_toggles_boss_terminal_without_closing_reader() {
+        let mut app = App::new();
+        assert!(!app.boss_mode);
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert!(app.boss_mode && !app.should_quit);
+        app.open_reader(app.books[0].clone());
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('Q'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert!(!app.boss_mode && app.reader.is_some());
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(app.boss_mode);
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(!app.boss_mode);
+    }
+
+    #[test]
+    fn auto_reader_toggle_and_tick_move_at_configured_interval() {
+        let mut app = App::new();
+        app.open_reader(app.books[0].clone());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let reader = app.reader.as_mut().unwrap();
+        reader.options.0[10] = 0;
+        reader.toggle_auto();
+        assert!(reader.auto_active());
+        assert_eq!(reader.auto_progress(), 0.0);
+        reader.tick_auto(900);
+        assert_eq!(reader.offset, 0);
+        assert!(reader.auto_progress() > 0.8);
+        reader.tick_auto(100);
+        assert!(reader.offset > 0 || reader.request.is_some());
+        reader.toggle_auto();
+        let offset = reader.offset;
+        reader.tick_auto(5_000);
+        assert_eq!(reader.offset, offset);
+    }
+
+    #[test]
+    fn horizontal_controls_block_vertical_scrolling_and_follow_arrow_direction() {
+        let mut app = App::new();
+        app.demo.prefs.0[4] = 1;
+        app.demo.prefs.0[8] = 1;
+        app.open_reader(app.books[0].clone());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        for direction in [0, 1] {
+            app.reader.as_mut().unwrap().options.0[9] = direction;
+            key(&mut app, KeyCode::Home);
+            for code in [
+                KeyCode::Down,
+                KeyCode::Up,
+                KeyCode::Char('j'),
+                KeyCode::Char('k'),
+            ] {
+                key(&mut app, code);
+                assert_eq!(app.reader.as_ref().unwrap().offset, 0);
+            }
+            key(
+                &mut app,
+                if direction == 0 {
+                    KeyCode::Right
+                } else {
+                    KeyCode::Left
+                },
+            );
+            let offset = app.reader.as_ref().unwrap().offset;
+            assert!(offset > 0);
+            key(&mut app, KeyCode::Down);
+            assert_eq!(app.reader.as_ref().unwrap().offset, offset);
+            key(&mut app, KeyCode::Char(' '));
+            assert!(app.reader.as_ref().unwrap().offset > offset);
+            key(&mut app, KeyCode::PageUp);
+            assert_eq!(app.reader.as_ref().unwrap().offset, offset);
+            key(
+                &mut app,
+                if direction == 0 {
+                    KeyCode::Left
+                } else {
+                    KeyCode::Right
+                },
+            );
+            assert_eq!(app.reader.as_ref().unwrap().offset, 0);
+        }
+        key(&mut app, KeyCode::Tab);
+        let selected = app.reader.as_ref().unwrap().selected;
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.reader.as_ref().unwrap().selected, selected + 1);
     }
 }

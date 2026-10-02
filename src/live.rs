@@ -756,6 +756,20 @@ impl App {
                     index: index as usize,
                     end,
                 });
+                let prefetch = self.demo.prefs.0.get(7).copied().unwrap_or(0);
+                if prefetch > 0 {
+                    if let Some(book) = live.current.clone() {
+                        for next in 1..=prefetch {
+                            if let Some(chapter) = live.chapters.get(index as usize + next).cloned()
+                            {
+                                self.commands.push(Command::Prefetch {
+                                    book: book.clone(),
+                                    chapter,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
         if self.tick.is_multiple_of(20) {

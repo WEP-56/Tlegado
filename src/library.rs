@@ -51,7 +51,9 @@ impl Backend {
             .map(serde_json::from_value)
             .transpose()?;
         let prefs = match self.documents.get_value(NAMESPACE, PREFERENCES).await? {
-            Some(value) => Prefs(serde_json::from_value(value).context("阅读偏好格式无效")?),
+            Some(value) => {
+                Prefs::normalize(serde_json::from_value(value).context("阅读偏好格式无效")?)
+            }
             None => Prefs::default(),
         };
         if prefs
@@ -76,6 +78,9 @@ impl Backend {
             Change::RemoveBook(book) => self.remove_book(&book).await?,
             Change::Preference { index, step } => {
                 let len = PREFS.get(index).context("未知偏好")?.1.len();
+                if !state.prefs.enabled(index) {
+                    return Ok(());
+                }
                 state.prefs.0[index] =
                     (state.prefs.0[index] as isize + step).rem_euclid(len as isize) as usize;
                 self.documents
@@ -449,6 +454,9 @@ impl App {
                 } else {
                     1
                 };
+                if !self.demo.prefs.enabled(self.demo.pref_sel) {
+                    return true;
+                }
                 self.commands.push(Command::Library(Change::Preference {
                     index: self.demo.pref_sel,
                     step,
