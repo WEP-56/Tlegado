@@ -1,0 +1,30 @@
+{
+  "backend": "http",
+  "endpoint": "https://api.xiaomimimo.com/v1/chat/completions",
+  "api_key_env": "MIMO_API_KEY",
+  "model": "",
+  "voice": "",
+  "response_format": "wav",
+  "response_mode": "json_base64",
+  "body_template": {
+    "model": "mimo-v2.5-tts",
+    "messages": [
+      {
+        "role": "user",
+        "content": "请用自然、清晰、适合长篇阅读的语气朗读后面的内容。"
+      },
+      {
+        "role": "assistant",
+        "content": "{{text}}"
+      }
+    ],
+    "audio": {
+      "format": "wav",
+      "voice": "mimo_default"
+    }
+  },
+  "timeout_seconds": 60,
+  "retries": 1,
+  "cache_max_mb": 256,
+  "prefetch": false
+}

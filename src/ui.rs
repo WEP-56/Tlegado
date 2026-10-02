@@ -28,14 +28,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    // 状态栏各占一行；只在较高终端保留一行顶部呼吸空间。
+    let footer_height = app
+        .reader
+        .as_ref()
+        .filter(|r| r.aloud_active())
+        .map_or(1, |reader| {
+            aloud_footer_lines(app, reader, area.width.saturating_sub(2)).len() as u16
+        })
+        .min(area.height.saturating_sub(4).max(1));
+    // 听书控制器按实际宽度分行，保证窄屏仍可发现所有播放控制。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),                            // top bar
             Constraint::Length(u16::from(area.height >= 30)), // gap
             Constraint::Min(0),                               // body
-            Constraint::Length(1),                            // footer
+            Constraint::Length(footer_height),                // footer
         ])
         .split(inset(area, 1, 0));
 
@@ -328,6 +336,15 @@ fn draw_status_line(f: &mut Frame, area: Rect, left: Line<'_>, right: &str) {
 
 // ── 底栏 ────────────────────────────────────────────────────
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    if let Some(reader) = app.reader.as_ref().filter(|r| r.aloud_active()) {
+        ratatui::widgets::Clear.render(area, f.buffer_mut());
+        f.render_widget(
+            Paragraph::new(aloud_footer_lines(app, reader, area.width))
+                .style(s(THEME.fg).bg(THEME.bg)),
+            area,
+        );
+        return;
+    }
     let left = if let Some((ref msg, tone, _)) = app.toast {
         let (icon, color) = match tone {
             ToastTone::Ok => ("✓", THEME.ok),
@@ -337,6 +354,14 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(format!("{icon} "), s(color)),
             Span::styled(msg.clone(), s(color)),
+        ])
+    } else if app.reader.is_none() && matches!(app.route(), Route::Tts) && app.focus == Focus::Main
+    {
+        hints(&[
+            ("↑↓", "选择"),
+            ("Enter", "编辑"),
+            ("Ctrl+S", "保存"),
+            ("Esc", "返回"),
         ])
     } else if let Some(live) = app.live.as_ref().filter(|l| !l.status.is_empty()) {
         let prefix = if live.busy() {
@@ -349,23 +374,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             s(THEME.info),
         ))
     } else if area.width < 70 {
-        hints(&[
-            ("tab", "焦点"),
-            ("?", "帮助"),
-            (
-                "q",
-                if app.reader.is_some() {
-                    "返回"
-                } else {
-                    "退出"
-                },
-            ),
-        ])
+        if app.reader.is_some() {
+            hints(&[("p", "听书"), ("?", "帮助"), ("q", "返回")])
+        } else {
+            hints(&[("tab", "焦点"), ("?", "帮助"), ("q", "退出")])
+        }
     } else if app.reader.is_some() && app.focus == Focus::Sidebar {
         hints(&[
             ("tab", "正文"),
             ("j/k", "选章"),
             ("enter", "阅读"),
+            ("p", "听书"),
             ("q", "返回"),
             ("?", "帮助"),
         ])
@@ -379,6 +398,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             },
             ("space", "翻页"),
             ("A", "自动阅读"),
+            ("p", "听书"),
             ("s", "换源"),
             ("a", "加入书架"),
             ("q", "返回"),
@@ -400,6 +420,87 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ""
     };
     draw_status_line(f, area, left, right);
+}
+
+fn aloud_footer_lines(app: &App, reader: &crate::reader::Reader, width: u16) -> Vec<Line<'static>> {
+    let status = if reader.aloud_loading() {
+        "加载中"
+    } else if reader.aloud_error().is_some() {
+        "失败"
+    } else if reader.aloud_playing() && reader.aloud_preparing() {
+        "准备中"
+    } else if reader.aloud_playing() {
+        "▶"
+    } else {
+        "Ⅱ"
+    };
+    let mut line = Line::from(Span::styled(
+        format!(
+            "{status} {} · {}",
+            reader.aloud_speed_label(),
+            reader.aloud_timer_label()
+        ),
+        sb(THEME.accent),
+    ));
+    let mut lines = Vec::new();
+    let hint_items = [
+        (
+            "p/空格",
+            if reader.aloud_error().is_some() {
+                "重试"
+            } else if reader.aloud_playing() {
+                "暂停"
+            } else {
+                "继续"
+            },
+        ),
+        (
+            "[ ]",
+            if width >= 140 {
+                "上一段/下一段"
+            } else {
+                "段落"
+            },
+        ),
+        (
+            "{ }",
+            if width >= 140 {
+                "上一章/下一章"
+            } else {
+                "章节"
+            },
+        ),
+        ("-/+", "倍速"),
+        ("t", "定时"),
+        ("s", "停止"),
+        ("q/Esc", "返回"),
+    ];
+    for (key, label) in hint_items {
+        let item_width = key.width() + 1 + label.width();
+        if line.width() + 2 + item_width > usize::from(width) {
+            lines.push(line);
+            line = Line::default();
+        } else {
+            line.spans.push(Span::styled("  ", s(THEME.dim)));
+        }
+        line.spans
+            .push(Span::styled(key.to_string(), s(THEME.mute)));
+        line.spans
+            .push(Span::styled(format!(" {label}"), s(THEME.dim)));
+    }
+    lines.push(line);
+    if let Some(message) = reader.aloud_error() {
+        lines.push(Line::styled(
+            truncate(message, width as usize),
+            s(THEME.err),
+        ));
+    } else if let Some((message, ToastTone::Err, _)) = &app.toast {
+        lines.push(Line::styled(
+            truncate(message, width as usize),
+            s(THEME.err),
+        ));
+    }
+    lines
 }
 
 // ── 主体：侧栏 + 主区 ───────────────────────────────────────
@@ -533,6 +634,7 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         Route::Discover { source_idx } => draw_discover(f, app, body, source_idx),
         Route::ExploreSources => crate::sources::draw(f, app, body),
         Route::Search => draw_search(f, app, body),
+        Route::Tts => crate::audio::settings::draw(f, app, body),
         Route::Sources if app.live.is_some() && !app.demo.json => {
             crate::sources::draw(f, app, body)
         }
@@ -1290,7 +1392,7 @@ fn draw_help(f: &mut Frame, area: Rect, live: bool) {
 }
 
 fn draw_reader_help(f: &mut Frame, area: Rect, live: bool, horizontal: bool) {
-    let r = center_rect(area, 68, 19);
+    let r = center_rect(area, 68, 20);
     ratatui::widgets::Clear.render(r, f.buffer_mut());
     let block = panel(
         vec![Span::styled("阅读快捷键", sb(THEME.hi))],
@@ -1309,6 +1411,7 @@ fn draw_reader_help(f: &mut Frame, area: Rect, live: bool, horizontal: bool) {
         },
         "Space     下一页；PgUp/PgDn 翻页（到边界自动切章）",
         "A         自动滚动/翻页启停；底部进度条显示下一次动作",
+        "p         启动听书；播放控制见底栏，s 停止",
         "[ / ]     上一章 / 下一章",
         "g / G     目录首尾 / 正文首尾",
         "t         聚焦当前章节目录",

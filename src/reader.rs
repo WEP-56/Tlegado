@@ -1,6 +1,6 @@
 //! 阅读排版与章节导航；真实正文与显式演示模式共享渲染。
 use crate::data::Book;
-use crate::theme::{list_scroll, panel, row_line, s, sb, truncate, THEME};
+use crate::theme::{list_scroll, panel, row_line, s, sb, sbg, truncate, THEME};
 use ratatui::{
     layout::Rect,
     text::{Line, Span},
@@ -33,7 +33,42 @@ pub struct Reader {
     horizontal_layout: bool,
     auto_active: bool,
     auto_elapsed_ms: u64,
+    aloud: AloudState,
+    demo_segments: Vec<AloudSegment>,
+    pending_aloud: Option<(u32, bool)>,
+    aloud_error: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AloudStatus {
+    Inactive,
+    Playing,
+    Paused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AloudSegment {
+    start: usize,
+    end: usize,
+    line_start: usize,
+    line_end: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AloudState {
+    status: AloudStatus,
+    segment: usize,
+    speed: usize,
+    timer: usize,
+    timer_remaining_ms: u64,
+    revision: u64,
+    progress: Option<usize>,
+    preparing: bool,
+    finished: bool,
+}
+
+const ALOUD_SPEEDS: [&str; 5] = ["0.8x", "1.0x", "1.25x", "1.5x", "2.0x"];
+const ALOUD_TIMERS: [u64; 5] = [0, 15, 30, 60, 90];
 
 struct RealText {
     titles: Vec<String>,
@@ -91,6 +126,355 @@ impl Reader {
             horizontal_layout: false,
             auto_active: false,
             auto_elapsed_ms: 0,
+            demo_segments: Vec::new(),
+            pending_aloud: None,
+            aloud_error: None,
+            aloud: AloudState {
+                status: AloudStatus::Inactive,
+                segment: 0,
+                speed: 1,
+                timer: 0,
+                timer_remaining_ms: 0,
+                revision: 0,
+                progress: None,
+                preparing: false,
+                finished: false,
+            },
+        }
+    }
+
+    pub fn aloud_active(&self) -> bool {
+        self.aloud.status != AloudStatus::Inactive
+    }
+
+    pub fn aloud_playing(&self) -> bool {
+        self.aloud.status == AloudStatus::Playing
+    }
+
+    pub fn aloud_loading(&self) -> bool {
+        self.pending_aloud.is_some()
+    }
+
+    pub fn aloud_speed_label(&self) -> &'static str {
+        ALOUD_SPEEDS[self.aloud.speed]
+    }
+
+    pub fn aloud_speed_percent(&self) -> u16 {
+        [80, 100, 125, 150, 200][self.aloud.speed]
+    }
+    pub fn aloud_revision(&self) -> u64 {
+        self.aloud.revision
+    }
+    pub fn aloud_preparing(&self) -> bool {
+        self.aloud.preparing
+    }
+    pub fn aloud_error(&self) -> Option<&str> {
+        self.aloud_error.as_deref()
+    }
+    pub fn set_aloud_preparing(&mut self, preparing: bool) {
+        self.aloud.preparing = preparing;
+    }
+    pub fn set_aloud_finished(&mut self) {
+        self.aloud.finished = true;
+    }
+    pub fn set_aloud_progress(&mut self, position: usize) {
+        self.aloud.progress = Some(position);
+        self.aloud.preparing = false;
+        self.follow_aloud();
+    }
+    pub fn fail_aloud(&mut self, error: String) {
+        self.aloud.status = AloudStatus::Paused;
+        self.aloud.preparing = false;
+        self.aloud_error = Some(error);
+    }
+    fn reset_aloud_segment(&mut self) {
+        self.aloud.revision = self.aloud.revision.wrapping_add(1);
+        self.aloud.progress = None;
+        self.aloud.preparing = false;
+        self.aloud.finished = false;
+        self.aloud_error = None;
+    }
+
+    pub fn speech_text(&self) -> crate::audio::SpeechText {
+        self.speech_text_at(self.aloud.segment, self.aloud.progress)
+    }
+
+    pub fn next_speech_text(&self) -> Option<String> {
+        if self.aloud.segment + 1 >= self.aloud_segments().len() {
+            return None;
+        }
+        Some(self.speech_text_at(self.aloud.segment + 1, None).text)
+    }
+
+    fn speech_text_at(&self, index: usize, progress: Option<usize>) -> crate::audio::SpeechText {
+        let Some(segment) = self.aloud_segments().get(index).copied() else {
+            return Default::default();
+        };
+        if let Some(real) = &self.real {
+            let Some(chapter) = real
+                .chapters
+                .iter()
+                .find(|chapter| chapter.index == self.chapter)
+            else {
+                return Default::default();
+            };
+            let start = progress
+                .map_or(segment.start, |position| chapter.body + position)
+                .clamp(segment.start, segment.end);
+            let rules = if self.options.0[6] == 0 {
+                self.live_rules.as_slice()
+            } else {
+                &[]
+            };
+            let (display, mapping, _) = crate::purify::apply_report(&real.text, rules);
+            let mut spoken = crate::audio::SpeechText::default();
+            for (ch, position) in display.chars().zip(mapping) {
+                if position >= start && position < segment.end {
+                    spoken.text.push(ch);
+                    spoken.positions.push(position.saturating_sub(chapter.body));
+                }
+            }
+            spoken
+        } else {
+            let paragraph = if index == 0 {
+                format!(
+                    "《{}》 · {}。以下为阅读排版预览，章节名与正文均为演示内容。",
+                    self.book.title,
+                    chapter_title(self.chapter)
+                )
+            } else {
+                PARAGRAPHS[(self.chapter as usize + index - 1) % PARAGRAPHS.len()].to_string()
+            };
+            let text = if self.options.0[6] == 0 {
+                crate::demo::purify(&paragraph, &self.rules)
+            } else {
+                paragraph
+            };
+            crate::audio::SpeechText {
+                positions: vec![0; text.chars().count()],
+                text,
+            }
+        }
+    }
+
+    pub fn aloud_timer_label(&self) -> String {
+        if self.aloud.timer_remaining_ms == 0 {
+            return "定时关".into();
+        }
+        let minutes = self.aloud.timer_remaining_ms.div_ceil(60_000);
+        format!("定时 {minutes}分")
+    }
+
+    pub fn start_aloud(&mut self) {
+        if self.request.is_some() {
+            return;
+        }
+        let segments = self.aloud_segments();
+        if segments.is_empty() {
+            return;
+        }
+        let position = if self.real.is_some() {
+            self.absolute_position()
+        } else {
+            self.offset
+        };
+        self.aloud.segment = segments
+            .iter()
+            .position(|segment| position >= segment.start && position < segment.end)
+            .or_else(|| segments.iter().position(|segment| position < segment.start))
+            .unwrap_or(segments.len().saturating_sub(1));
+        self.auto_active = false;
+        self.reset_aloud_segment();
+        if let Some(real) = &self.real {
+            if let Some(chapter) = real
+                .chapters
+                .iter()
+                .find(|chapter| chapter.index == self.chapter)
+            {
+                self.aloud.progress = Some(
+                    position
+                        .max(segments[self.aloud.segment].start)
+                        .saturating_sub(chapter.body),
+                );
+            }
+        }
+        self.aloud.status = AloudStatus::Playing;
+        self.follow_aloud();
+    }
+
+    pub fn toggle_aloud(&mut self) {
+        match self.aloud.status {
+            AloudStatus::Inactive => self.start_aloud(),
+            AloudStatus::Playing => self.aloud.status = AloudStatus::Paused,
+            AloudStatus::Paused => {
+                self.aloud.status = AloudStatus::Playing;
+                if self.aloud_error.take().is_some() {
+                    self.aloud.revision = self.aloud.revision.wrapping_add(1);
+                }
+                if self.aloud.finished {
+                    self.next_aloud_segment();
+                }
+            }
+        }
+    }
+
+    pub fn stop_aloud(&mut self) {
+        self.aloud.status = AloudStatus::Inactive;
+        self.aloud.timer = 0;
+        self.aloud.timer_remaining_ms = 0;
+        self.pending_aloud = None;
+        self.reset_aloud_segment();
+    }
+
+    pub fn next_aloud_segment(&mut self) {
+        if !self.aloud_active() || self.aloud_loading() {
+            return;
+        }
+        let count = self.aloud_segments().len();
+        if self.aloud.segment + 1 < count {
+            self.aloud.segment += 1;
+            self.reset_aloud_segment();
+        } else if self.chapter + 1 < self.book.total {
+            self.jump_aloud_chapter(1, false);
+            return;
+        } else {
+            self.stop_aloud();
+            return;
+        }
+        self.follow_aloud();
+    }
+
+    pub fn previous_aloud_segment(&mut self) {
+        if !self.aloud_active() || self.aloud_loading() {
+            return;
+        }
+        if self.aloud.segment > 0 {
+            self.aloud.segment -= 1;
+        } else if self.chapter > 0 {
+            self.jump_aloud_chapter(-1, true);
+            return;
+        }
+        self.reset_aloud_segment();
+        self.follow_aloud();
+    }
+
+    pub fn next_aloud_chapter(&mut self) {
+        self.jump_aloud_chapter(1, false);
+    }
+
+    pub fn previous_aloud_chapter(&mut self) {
+        self.jump_aloud_chapter(-1, false);
+    }
+
+    fn jump_aloud_chapter(&mut self, delta: i32, last: bool) {
+        if !self.aloud_active() || self.aloud_loading() {
+            return;
+        }
+        let target = (i64::from(self.chapter) + i64::from(delta))
+            .clamp(0, i64::from(self.book.total.saturating_sub(1))) as u32;
+        if target == self.chapter {
+            return;
+        }
+        self.pending_aloud = Some((target, last));
+        self.change_chapter(delta);
+        if self.chapter == target {
+            self.finish_aloud_chapter();
+        }
+    }
+
+    fn finish_aloud_chapter(&mut self) {
+        if let Some((target, last)) = self.pending_aloud {
+            if self.chapter == target {
+                self.pending_aloud = None;
+                self.reset_aloud_segment();
+                self.aloud.segment = if last {
+                    self.aloud_segments().len().saturating_sub(1)
+                } else {
+                    0
+                };
+                if self.aloud_segments().is_empty() {
+                    self.stop_aloud();
+                }
+            }
+        }
+    }
+
+    pub fn aloud_chapter_failed(&mut self) {
+        if self.pending_aloud.take().is_some() && self.aloud_active() {
+            self.aloud.status = AloudStatus::Paused;
+            self.selected = self.chapter;
+        }
+    }
+
+    pub fn adjust_aloud_speed(&mut self, delta: i32) {
+        if !self.aloud_active() {
+            return;
+        }
+        self.aloud.speed =
+            (self.aloud.speed as i32 + delta).clamp(0, ALOUD_SPEEDS.len() as i32 - 1) as usize;
+    }
+
+    pub fn cycle_aloud_timer(&mut self) {
+        if !self.aloud_active() {
+            return;
+        }
+        self.aloud.timer = (self.aloud.timer + 1) % ALOUD_TIMERS.len();
+        self.aloud.timer_remaining_ms = ALOUD_TIMERS[self.aloud.timer] * 60_000;
+    }
+
+    pub fn tick_aloud(&mut self, elapsed_ms: u64) {
+        if !self.aloud_active() || self.aloud.timer_remaining_ms == 0 {
+            return;
+        }
+        self.aloud.timer_remaining_ms = self.aloud.timer_remaining_ms.saturating_sub(elapsed_ms);
+        if self.aloud.timer_remaining_ms == 0 {
+            self.stop_aloud();
+        }
+    }
+
+    fn aloud_highlight(&self) -> Option<AloudSegment> {
+        if !self.aloud_active() {
+            return None;
+        }
+        self.aloud_segments().get(self.aloud.segment).copied()
+    }
+
+    fn follow_aloud(&mut self) {
+        if self.width == 0 || self.aloud_loading() {
+            return;
+        }
+        if let Some(segment) = self.aloud_highlight() {
+            if segment.line_start >= segment.line_end {
+                return;
+            }
+            let anchor = self
+                .real
+                .as_ref()
+                .and_then(|real| {
+                    let progress = self.aloud.progress?;
+                    let chapter = real
+                        .chapters
+                        .iter()
+                        .find(|chapter| chapter.index == self.chapter)?;
+                    Some(
+                        real.positions
+                            .partition_point(|position| *position <= chapter.body + progress)
+                            .saturating_sub(1)
+                            .clamp(segment.line_start, segment.line_end - 1),
+                    )
+                })
+                .unwrap_or(segment.line_start);
+            let end = if self.aloud.progress.is_some() {
+                anchor + 1
+            } else {
+                segment.line_end
+            };
+            if anchor < self.offset || end > self.offset + self.height {
+                self.offset = anchor.min(self.max_offset());
+                if self.is_horizontal() {
+                    self.offset = self.offset / self.height * self.height;
+                }
+            }
         }
     }
 
@@ -355,6 +739,11 @@ impl Reader {
     }
 
     pub fn set_chapter(&mut self, index: u32, text: String, end: bool) {
+        self.install_chapter(index, text, end);
+        self.finish_aloud_chapter();
+    }
+
+    fn install_chapter(&mut self, index: u32, text: String, end: bool) {
         self.auto_elapsed_ms = 0;
         let position = self.absolute_position();
         let pending = self
@@ -464,7 +853,14 @@ impl Reader {
 
     /// Tlegado stores a Unicode scalar offset here, never a terminal row number.
     pub fn position(&self) -> usize {
-        let position = self.absolute_position();
+        if self.aloud_active() {
+            if let Some(position) = self.aloud.progress {
+                return position;
+            }
+        }
+        let position = self
+            .aloud_highlight()
+            .map_or_else(|| self.absolute_position(), |segment| segment.start);
         self.real
             .as_ref()
             .and_then(|r| r.chapters.iter().find(|c| c.index == self.chapter))
@@ -479,6 +875,40 @@ impl Reader {
                     .unwrap_or_else(|| r.positions.get(self.offset).copied().unwrap_or(0))
             })
             .unwrap_or(0)
+    }
+
+    fn aloud_segments(&self) -> Vec<AloudSegment> {
+        if let Some(real) = &self.real {
+            let Some(range) = real.chapters.iter().find(|c| c.index == self.chapter) else {
+                return Vec::new();
+            };
+            let chapter: String = real
+                .text
+                .chars()
+                .skip(range.body)
+                .take(range.end.saturating_sub(range.body))
+                .collect();
+            let mut segments = Vec::new();
+            let mut start = range.body;
+            for paragraph in chapter.split('\n') {
+                let len = paragraph.chars().count();
+                let end = start + len;
+                if !paragraph.trim().is_empty() {
+                    let line_start = real.positions.partition_point(|position| *position < start);
+                    let line_end = real.positions.partition_point(|position| *position < end);
+                    segments.push(AloudSegment {
+                        start,
+                        end,
+                        line_start,
+                        line_end,
+                    });
+                }
+                start = end + 1;
+            }
+            return segments;
+        }
+
+        self.demo_segments.clone()
     }
 
     fn prepare(&mut self, width: u16, height: u16) {
@@ -583,11 +1013,15 @@ impl Reader {
             if horizontal {
                 self.offset = self.offset / self.height * self.height;
             }
-            self.sync_chapter();
+            if !self.aloud_active() {
+                self.sync_chapter();
+            }
+            self.follow_aloud();
             return;
         }
         if self.width != width {
             self.lines.clear();
+            self.demo_segments.clear();
             let intro = format!(
                 "《{}》 · {}。以下为阅读排版预览，章节名与正文均为演示内容。",
                 self.book.title,
@@ -607,11 +1041,20 @@ impl Reader {
                     paragraph.to_string()
                 };
                 let indent = if self.options.0[3] == 1 { "　　" } else { "" };
+                let start = self.lines.len();
                 for line in wrap(&format!("{indent}{paragraph}"), width as usize) {
                     self.lines.push(line);
                     if self.options.0[2] == 1 {
                         self.lines.push(String::new());
                     }
+                }
+                if !paragraph.trim().is_empty() {
+                    self.demo_segments.push(AloudSegment {
+                        start,
+                        end: self.lines.len(),
+                        line_start: start,
+                        line_end: self.lines.len(),
+                    });
                 }
                 self.lines.push(String::new());
             }
@@ -627,6 +1070,277 @@ impl Reader {
         if horizontal {
             self.offset = self.offset / self.height * self.height;
         }
+        self.follow_aloud();
+    }
+}
+
+#[cfg(test)]
+mod aloud_tests {
+    use super::*;
+
+    fn reader(text: &str, horizontal: bool, seamless: bool) -> Reader {
+        let mut book = crate::data::shelf().remove(0);
+        book.read = 0;
+        book.total = 3;
+        let mut reader = Reader::new(book, false);
+        reader.options.0[4] = usize::from(horizontal);
+        reader.options.0[8] = usize::from(seamless);
+        reader.set_real(vec!["一".into(), "二".into(), "三".into()], text.into(), 0);
+        reader.prepare(18, 5);
+        reader
+    }
+
+    #[test]
+    fn aloud_highlight_is_distinct_across_themes_without_changing_text_layout() {
+        use ratatui::{
+            backend::TestBackend,
+            style::{Color, Modifier},
+            Terminal,
+        };
+        let brightness = |color: Color| -> i32 {
+            match color {
+                Color::Rgb(r, g, b) => {
+                    (i32::from(r) * 299 + i32::from(g) * 587 + i32::from(b) * 114) / 1000
+                }
+                Color::Black => 0,
+                Color::White => 255,
+                _ => panic!("expected explicit reading colors"),
+            }
+        };
+        for (theme, custom_background) in [
+            (0, None),
+            (1, None),
+            (2, None),
+            (3, None),
+            (0, Some("#ffe3a35a")),
+            (0, Some("#ff666666")),
+        ] {
+            let mut reader = reader(
+                &format!("{}\n普通段落保持原样。", "当前朗读段落😀ABC。".repeat(4)),
+                false,
+                false,
+            );
+            reader.options.0[0] = theme;
+            reader.options.0[2] = 1;
+            if let Some(color) = custom_background {
+                reader.layout = Some(
+                    crate::plugins::parse_layout(&format!(
+                        r##"{{"bgStr":"{color}","textColor":"#ff999999","lineSpacingExtra":1}}"##
+                    ))
+                    .unwrap(),
+                );
+            }
+            reader.refresh_layout();
+            let mut terminal = Terminal::new(TestBackend::new(60, 22)).unwrap();
+            let normal = terminal
+                .draw(|frame| draw_page(frame, &mut reader, frame.area(), true))
+                .unwrap()
+                .buffer
+                .clone();
+            reader.start_aloud();
+            let active = terminal
+                .draw(|frame| draw_page(frame, &mut reader, frame.area(), true))
+                .unwrap()
+                .buffer
+                .clone();
+            let segment = reader.aloud_highlight().unwrap();
+            for row in segment.line_start..segment.line_end {
+                let y = 2 + (row - reader.offset) as u16;
+                assert_eq!(
+                    active[(1, y)].symbol(),
+                    if row == segment.line_start {
+                        "▶"
+                    } else {
+                        "┃"
+                    }
+                );
+                for x in 3..57 {
+                    let before = &normal[(x, y)];
+                    let after = &active[(x, y)];
+                    assert_eq!(
+                        after.symbol(),
+                        before.symbol(),
+                        "theme={theme}, x={x}, y={y}"
+                    );
+                    assert!((brightness(after.bg) - brightness(before.bg)).abs() >= 70);
+                    assert!((brightness(after.fg) - brightness(after.bg)).abs() >= 120);
+                    assert!(after.modifier.contains(Modifier::BOLD));
+                }
+            }
+            let next_row = 2 + reader.aloud_segments()[1].line_start as u16;
+            assert_eq!(normal[(3, next_row)], active[(3, next_row)]);
+            reader.toggle_aloud();
+            let paused = terminal
+                .draw(|frame| draw_page(frame, &mut reader, frame.area(), true))
+                .unwrap()
+                .buffer
+                .clone();
+            assert_eq!(active[(3, 2)], paused[(3, 2)]);
+            reader.stop_aloud();
+            let stopped = terminal
+                .draw(|frame| draw_page(frame, &mut reader, frame.area(), true))
+                .unwrap()
+                .buffer
+                .clone();
+            assert_eq!(normal, stopped);
+        }
+    }
+
+    #[test]
+    fn spoken_text_uses_purification_and_original_offsets_without_headings_or_layout() {
+        use reader_core::model::replace_rule::ReplaceRule;
+        let mut reader = reader("广告甲😀第一段。\n第二段。", false, true);
+        reader.live_rules = vec![crate::purify::CompiledRule::new(&ReplaceRule {
+            name: "删除广告".into(),
+            pattern: "广告".into(),
+            replacement: "".into(),
+            ..Default::default()
+        })
+        .unwrap()];
+        reader.refresh_layout();
+        reader.prepare(18, 5);
+        reader.start_aloud();
+        let spoken = reader.speech_text();
+        assert_eq!(spoken.text, "甲😀第一段。");
+        assert_eq!(spoken.positions, (2..8).collect::<Vec<_>>());
+        reader.set_aloud_progress(4);
+        assert_eq!(reader.position(), 4);
+        assert_eq!(reader.speech_text().text, "第一段。");
+        reader.next_aloud_segment();
+        assert_eq!(reader.speech_text().text, "第二段。");
+        assert_eq!(reader.position(), 9);
+    }
+
+    #[test]
+    fn chunk_progress_follows_within_a_long_paragraph_and_keeps_its_identity() {
+        let text = "长段落😀。".repeat(300);
+        for horizontal in [false, true] {
+            let mut reader = reader(&text, horizontal, false);
+            reader.start_aloud();
+            reader.set_aloud_progress(480);
+            let position = reader.position();
+            assert_eq!(position, 480);
+            assert!(reader.offset > 0);
+            assert_eq!(reader.aloud.segment, 0);
+            reader.prepare(24, 6);
+            assert_eq!(reader.position(), position);
+            assert_eq!(reader.aloud.segment, 0);
+            assert!(reader.offset > 0);
+        }
+    }
+
+    #[test]
+    fn paragraphs_keep_unicode_offsets_and_follow_after_resize() {
+        let first = "中文😀 mixed words。".repeat(12);
+        let text = format!("{first}\r\n \t\r\n第二段内容。\n第三段结尾。");
+        for horizontal in [false, true] {
+            let mut reader = reader(&text, horizontal, false);
+            let segments = reader.aloud_segments();
+            assert_eq!(segments.len(), 3);
+            assert_eq!(segments[1].start, first.chars().count() + 6);
+            reader.start_aloud();
+            reader.next_aloud_segment();
+            let position = reader.position();
+            assert_eq!(position, segments[1].start);
+            assert!(reader.offset > 0);
+            reader.toggle_aloud();
+            reader.prepare(10, 4);
+            assert!(!reader.aloud_playing());
+            assert_eq!(reader.position(), position);
+            let highlighted = reader.aloud_highlight().unwrap();
+            assert!(highlighted.line_start >= reader.offset);
+            assert!(highlighted.line_start < reader.offset + reader.height);
+            reader.previous_aloud_segment();
+            assert_eq!(reader.position(), 0);
+            assert!(!reader.aloud_playing());
+        }
+    }
+
+    #[test]
+    fn chapter_requests_preserve_old_segment_until_success_and_can_retry_failure() {
+        for seamless in [false, true] {
+            let mut reader = reader("第一段\n第二段", false, seamless);
+            reader.start_aloud();
+            reader.next_aloud_segment();
+            let position = reader.position();
+            reader.next_aloud_segment();
+            assert_eq!(reader.request.take(), Some((1, false)));
+            assert_eq!(reader.chapter, 0);
+            assert_eq!(reader.position(), position);
+            reader.next_aloud_segment();
+            assert!(reader.request.is_none());
+            reader.aloud_chapter_failed();
+            assert!(!reader.aloud_playing());
+            assert!(!reader.aloud_loading());
+            assert_eq!(reader.position(), position);
+            reader.next_aloud_chapter();
+            assert_eq!(reader.request.take(), Some((1, false)));
+            reader.set_chapter(1, "新章第一段\n新章第二段\n新章第三段".into(), false);
+            reader.prepare(18, 5);
+            assert_eq!(reader.chapter, 1);
+            assert_eq!(reader.aloud.segment, 0);
+            assert!(!reader.aloud_loading());
+            reader.previous_aloud_segment();
+            if let Some((index, end)) = reader.request.take() {
+                reader.set_chapter(index, "第一段\n第二段".into(), end);
+            }
+            reader.prepare(18, 5);
+            assert_eq!(reader.chapter, 0);
+            assert_eq!(reader.aloud.segment, 1);
+            assert_eq!(reader.position(), "第一段\n".chars().count());
+        }
+    }
+
+    #[test]
+    fn timer_expires_while_paused_and_restarts_at_first_preset() {
+        let mut reader = reader("正文", false, false);
+        reader.toggle_auto();
+        reader.start_aloud();
+        assert!(!reader.auto_active());
+        reader.cycle_aloud_timer();
+        reader.toggle_aloud();
+        reader.tick_aloud(15 * 60_000);
+        assert!(!reader.aloud_active());
+        reader.start_aloud();
+        reader.cycle_aloud_timer();
+        assert_eq!(reader.aloud.timer_remaining_ms, 15 * 60_000);
+        for _ in 0..10 {
+            reader.adjust_aloud_speed(1);
+        }
+        assert_eq!(reader.aloud_speed_label(), "2.0x");
+        for _ in 0..10 {
+            reader.adjust_aloud_speed(-1);
+        }
+        assert_eq!(reader.aloud_speed_label(), "0.8x");
+    }
+
+    #[test]
+    fn demo_line_spacing_does_not_split_paragraphs_and_starts_at_viewport() {
+        let mut reader = Reader::new(crate::data::shelf().remove(0), false);
+        reader.options.0[2] = 1;
+        reader.prepare(18, 5);
+        assert_eq!(reader.aloud_segments().len(), 19);
+        reader.offset = reader.aloud_segments()[3].line_start;
+        reader.start_aloud();
+        assert_eq!(reader.aloud.segment, 3);
+        reader.prepare(25, 7);
+        assert_eq!(reader.aloud.segment, 3);
+        assert_eq!(reader.aloud_segments().len(), 19);
+    }
+
+    #[test]
+    fn empty_chapter_and_end_of_book_stop_cleanly() {
+        let mut reader = reader("最后一段", false, false);
+        reader.book.total = 1;
+        reader.start_aloud();
+        reader.next_aloud_segment();
+        assert!(!reader.aloud_active());
+        reader.book.total = 2;
+        reader.start_aloud();
+        reader.next_aloud_chapter();
+        reader.request.take();
+        reader.set_chapter(1, " \n\t\n".into(), false);
+        assert!(!reader.aloud_active());
     }
 }
 
@@ -990,6 +1704,7 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
         }),
         Rect::new(x, inner.y, width, 1),
     );
+    let aloud_highlight = reader.aloud_highlight();
     let lines: Vec<Line> = reader
         .lines
         .iter()
@@ -1036,15 +1751,41 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
         }
     }
     f.render_widget(Paragraph::new(lines).style(style.fg(fg).bg(bg)), content);
+    if let Some(segment) = aloud_highlight {
+        let highlight = aloud_paragraph_style(bg);
+        let start = segment.line_start.max(reader.offset);
+        let end = segment
+            .line_end
+            .min(reader.offset + content.height as usize);
+        for row in start..end {
+            let y = content.y + (row - reader.offset) as u16;
+            // Paint the full paragraph width, including line spacing and trailing cells.
+            // The marker uses the existing margin so text wrapping and offsets stay stable.
+            f.buffer_mut()
+                .set_style(Rect::new(content.x, y, content.width, 1), highlight);
+            f.render_widget(
+                Paragraph::new(if row == start { "▶" } else { "┃" }).style(sb(THEME.accent)),
+                Rect::new(content.x - 2, y, 1, 1),
+            );
+        }
+    }
     let page = (reader.offset + reader.height).div_ceil(reader.height);
     let pages = reader.lines.len().div_ceil(reader.height).max(1);
     let at_end = reader.offset == reader.max_offset();
     // The preference hides routine page progress, while chapter boundaries
     // remain visible so automatic chapter changes are never ambiguous.
-    if reader.options.0[5] == 1 && !at_end && !reader.auto_active() {
+    if reader.options.0[5] == 1 && !at_end && !reader.auto_active() && !reader.aloud_active() {
         return;
     }
-    let status = if at_end && reader.is_horizontal() {
+    let status = if reader.aloud_active() {
+        format!(
+            "第 {}/{} · 第 {}/{} 段",
+            reader.chapter + 1,
+            reader.book.total,
+            reader.aloud.segment + 1,
+            reader.aloud_segments().len()
+        )
+    } else if at_end && reader.is_horizontal() {
         format!(
             "第 {}/{} · {}/{} 页 · {}",
             reader.chapter + 1,
@@ -1117,6 +1858,23 @@ pub fn draw_page(f: &mut Frame, reader: &mut Reader, area: Rect, focused: bool) 
             .centered(),
         Rect::new(x, inner.bottom() - 1, width, 1),
     );
+}
+
+fn aloud_paragraph_style(background: ratatui::style::Color) -> ratatui::style::Style {
+    use ratatui::style::{Color, Modifier};
+    let light_background = match background {
+        Color::Rgb(r, g, b) => {
+            u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 >= 128_000
+        }
+        Color::White | Color::Gray => true,
+        _ => false,
+    };
+    let (fg, bg) = if light_background {
+        (Color::Rgb(255, 246, 222), Color::Rgb(75, 45, 14))
+    } else {
+        (Color::Rgb(28, 20, 11), THEME.accent)
+    };
+    sbg(fg, bg).add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

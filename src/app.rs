@@ -20,6 +20,7 @@ pub enum Route {
     Sources,
     Purify,
     Prefs,
+    Tts,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub struct App {
     pub commands: Vec<crate::jobs::Command>,
     pub demo: crate::demo::Demo,
     pub reader: Option<crate::reader::Reader>,
+    pub tts: crate::audio::settings::Settings,
     pub books: Vec<Book>,
     pub sources: Vec<Source>,
     pub source_browser: crate::sources::SourceBrowser,
@@ -88,6 +90,7 @@ impl App {
             commands: Vec::new(),
             demo: crate::demo::Demo::new(&books, sources.len()),
             reader: None,
+            tts: crate::audio::settings::Settings::default(),
             books,
             sources,
             source_browser: crate::sources::SourceBrowser::default(),
@@ -235,6 +238,13 @@ impl App {
             right: String::new(),
         });
 
+        items.push(NavItem {
+            id: "set:tts".into(),
+            section: Some("设置"),
+            label: "听书设置".into(),
+            route: Route::Tts,
+            right: String::new(),
+        });
         self.nav = items;
         if let Some(id) = cur_id {
             if let Some(i) = self.nav.iter().position(|n| n.id == id) {
@@ -282,6 +292,7 @@ impl App {
         if !self.boss_mode {
             if let Some(reader) = &mut self.reader {
                 reader.tick_auto(100);
+                reader.tick_aloud(100);
             }
         }
         if let Some((_, _, ref mut left)) = self.toast {
@@ -294,6 +305,28 @@ impl App {
 
     // ── 按键 ────────────────────────────────────────────────
     pub fn on_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.save_live_progress();
+            self.should_quit = true;
+            return;
+        }
+        if self
+            .reader
+            .as_ref()
+            .is_some_and(crate::reader::Reader::aloud_active)
+        {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return;
+            }
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                let _ = self.live_key(key);
+            }
+            self.on_key_reader(key);
+            return;
+        }
         // Most terminals encode Ctrl+Shift+Q as Ctrl+Q and omit the Shift bit.
         // Accept both encodings so the boss key works across terminal emulators.
         if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -304,6 +337,9 @@ impl App {
             return;
         }
         if self.boss_mode {
+            return;
+        }
+        if self.tts_settings_key(key) {
             return;
         }
         if self.live_key(key) {
@@ -468,6 +504,7 @@ impl App {
             Route::Shelf { filter } => self.on_key_shelf(key, filter),
             Route::Discover { source_idx } => self.on_key_discover(key, source_idx),
             Route::ExploreSources => {}
+            Route::Tts => {}
             Route::Search => self.on_key_search(key),
             Route::History | Route::Sources | Route::Purify | Route::Prefs => {
                 self.demo_key(key.code)
@@ -713,9 +750,26 @@ impl App {
             self.focus = Focus::Main;
             return;
         }
+        let chapter_loading = self.live.as_ref().is_some_and(|live| live.busy());
         let reader = self.reader.as_mut().expect("active reader");
+        if reader.aloud_active() {
+            match key.code {
+                KeyCode::Char('p') | KeyCode::Char(' ') => reader.toggle_aloud(),
+                KeyCode::Char('[') => reader.previous_aloud_segment(),
+                KeyCode::Char(']') => reader.next_aloud_segment(),
+                KeyCode::Char('{') => reader.previous_aloud_chapter(),
+                KeyCode::Char('}') => reader.next_aloud_chapter(),
+                KeyCode::Char('-') => reader.adjust_aloud_speed(-1),
+                KeyCode::Char('=') | KeyCode::Char('+') => reader.adjust_aloud_speed(1),
+                KeyCode::Char('t') | KeyCode::Char('T') => reader.cycle_aloud_timer(),
+                KeyCode::Char('s') => reader.stop_aloud(),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('p') if !chapter_loading => reader.start_aloud(),
             KeyCode::Char('A') => reader.toggle_auto(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.focus = if self.sidebar_hidden || self.focus == Focus::Sidebar {
@@ -1038,6 +1092,113 @@ mod reader_tests {
         let offset = reader.offset;
         reader.tick_auto(5_000);
         assert_eq!(reader.offset, offset);
+    }
+
+    #[test]
+    fn aloud_mode_owns_reader_keys_and_highlights_the_current_paragraph() {
+        let mut app = App::new();
+        app.open_reader(app.books[0].clone());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+
+        let offset = app.reader.as_ref().unwrap().offset;
+        let selected = app.reader.as_ref().unwrap().selected;
+        key(&mut app, KeyCode::Char('p'));
+        assert!(app.reader.as_ref().unwrap().aloud_playing());
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Tab,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Enter,
+            KeyCode::Char('a'),
+            KeyCode::Char('A'),
+            KeyCode::Char('?'),
+        ] {
+            key(&mut app, code);
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(!app.boss_mode);
+        assert!(!app.help);
+        assert!(app.focus == Focus::Main);
+        let reader = app.reader.as_ref().unwrap();
+        assert_eq!(reader.offset, offset);
+        assert_eq!(reader.selected, selected);
+        // Use the completed frame: TestBackend can retain old symbols in wide-character
+        // continuation cells when applying a diff from the previous screen.
+        let buffer = terminal
+            .draw(|f| crate::ui::draw(f, &mut app))
+            .unwrap()
+            .buffer
+            .clone();
+        assert!(buffer
+            .content
+            .iter()
+            .any(|cell| cell.bg == crate::theme::THEME.accent));
+        let text = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace(' ', "");
+        assert!(text.contains("段落") && text.contains("倍速"), "{text:?}");
+
+        key(&mut app, KeyCode::Char('p'));
+        assert!(app
+            .reader
+            .as_ref()
+            .is_some_and(|reader| { reader.aloud_active() && !reader.aloud_playing() }));
+        key(&mut app, KeyCode::Char('s'));
+        assert!(!app.reader.as_ref().unwrap().aloud_active());
+        key(&mut app, KeyCode::Char('p'));
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+        key(&mut app, KeyCode::Char('q'));
+        assert!(app.reader.is_none());
+    }
+
+    #[test]
+    fn aloud_controller_keeps_controls_visible_at_different_widths() {
+        for width in [40, 60, 80, 100, 160] {
+            let mut app = App::new();
+            app.open_reader(app.books[0].clone());
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            key(&mut app, KeyCode::Char('p'));
+            for paused in [false, true] {
+                if paused {
+                    key(&mut app, KeyCode::Char('p'));
+                }
+                let frame = terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+                let text = frame
+                    .buffer
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .replace(' ', "");
+                for label in [
+                    "倍速",
+                    "定时",
+                    "停止",
+                    "q/Esc",
+                    if paused { "继续" } else { "暂停" },
+                ] {
+                    assert!(
+                        text.contains(label),
+                        "width={width}, missing {label}: {text}"
+                    );
+                }
+                assert!(!text.contains("自动阅读"));
+                assert!(!text.contains("加入书架"));
+            }
+        }
     }
 
     #[test]

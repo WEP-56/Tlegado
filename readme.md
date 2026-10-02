@@ -25,6 +25,40 @@ React 原型源码位于 `TUI-example/Tlegado-TUI`，已同步最新原型压缩
 - `q` / `Esc`：返回进入阅读前的页面，并恢复原先的侧栏显隐状态。
 - `?`：阅读快捷键帮助。
 
+听书：阅读中按 `p` 启动，底部提示替换为播放控制器，当前段落高亮，语音读完后自动切段、切章。默认使用系统语音：Windows 原生 SAPI、macOS 系统 `say`、Linux `espeak-ng`（需自行安装）。也支持通过配置文件选择 BYOK 网络 TTS。
+
+- `p` / `Space`：暂停、继续；`[` / `]`：上一段、下一段；`{` / `}`：上一章、下一章。
+- `-` / `+`（也可用 `=`）：切换 0.8、1.0、1.25、1.5、2.0 倍速设置。
+- `t`：循环设置关闭、15、30、60、90 分钟停止；暂停时也计时，到期恢复文字阅读。
+- `s`：停止听书并留在正文；`q` / `Esc`：退出阅读；`Ctrl+C`：保存并退出程序。
+- 听书及暂停期间屏蔽其他快捷键，包括手动翻页、滚动、鼠标滚轮、目录、换源、自动阅读和侧栏切换。窄屏控制器自动分行。
+
+段落以原文章节正文中的换行为边界，跳过空白段，终端自动折行、行距和窗口缩放不会改变段落身份。朗读使用净化后的正文，跳过纯标点片段；每个合成片段最多 480 个 Unicode 字符，优先在句末或空白处切分，但高亮和上一段/下一段仍以原段落为单位。长段落进度随片段开始更新，使用原文字符偏移；从阅读位置启动时朗读当前段落的剩余内容。
+
+Windows 自动为中文内容选择可用的中文 SAPI 声音；没有兼容声音或音频设备不可用时，底栏显示错误并暂停，`p` 重试、`s` 停止。可在启动前通过 `TLEGADO_TTS_VOICE` 指定声音（Windows 为完整 SAPI 声音名称，macOS 为 `say` 声音名称，Linux 为 espeak-ng 的 voice ID，默认 `cmn`）。系统倍速为近似映射；Windows 可在播放中调速，macOS/Linux 的调速在下一个合成片段生效。Windows 使用原生暂停/恢复；macOS/Linux 暂停子进程，已提交给音频设备的少量缓冲可能继续播放。
+
+例如，已安装该声音的 Windows 机器可运行：
+
+```powershell
+$env:TLEGADO_TTS_VOICE = "Microsoft Huihui Desktop - Chinese (Simplified)"
+cargo run
+```
+
+本轮已在 Windows 验证原生短句播放、暂停恢复、调速和停止；macOS/Linux 兼容后端尚待对应平台实测。详见 [听书调研与实现边界](docs/audiobook-research.md)。
+
+BYOK：直接进入侧栏 **设置 → 听书设置**，选择 HTTP 后端，填写接口地址、模型、声音与 API 密钥，按 **Ctrl+S 保存生效**。↑/↓ 选择，Enter 编辑或切换，编辑中 Esc 取消字段，列表中 R 撤销未保存修改。密钥输入遮罩，直接填写的密钥会明文保存在页面显示的本地配置文件；也可改用环境变量。切回系统语音会保留 HTTP 配置。
+
+也可复制并填写 [配置示例](docs/examples/tts-http.example.json)，设置其中指定的密钥环境变量，然后运行：
+
+```powershell
+$env:TLEGADO_TTS_API_KEY = "你的服务商密钥"
+cargo run -- --tts-config "E:\Reader Config\tts.json"
+```
+
+支持兼容 JSON 请求或自定义请求模板、WAV/MP3 等音频播放、受限容量缓存与可选预取；调速从下一个合成片段生效。配置也可放在数据目录的 `tts.json`，不配置时仍为系统语音。详见 [BYOK 配置与使用说明](docs/byok-tts.md)。Linux 源码构建需要 ALSA 开发包（Debian/Ubuntu：`libasound2-dev pkg-config`）。
+
+MiMo-V2.5-TTS 使用 Chat Completions + JSON Base64 音频响应，不能使用默认 `/audio/speech` 模式；可直接参考 [MiMo 配置示例](docs/examples/tts-mimo-v2.5.json)。
+
 ## 本地开发
 
 默认启动真实模式，首次运行没有内置书源。先准备 Legado JSON 书源文件：

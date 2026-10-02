@@ -1,6 +1,6 @@
 [package]
 name = "tlegado"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Tlegado — 支持 Legado 书源的终端阅读器"
 
@@ -26,10 +26,19 @@ serde = { version = "1", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 fancy-regex = "0.16"
 rquickjs = "0.7"
+rodio = { version = "0.21.1", default-features = false, features = ["playback", "wav", "mp3", "flac", "vorbis"] }
+sha2 = "0.10"
+tempfile = "3"
+base64 = "0.23.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Media_Speech", "Win32_System_Com"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 axum = "0.7"
-tempfile = "3"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
 [patch.crates-io]

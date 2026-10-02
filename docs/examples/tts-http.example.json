@@ -1,0 +1,12 @@
+{
+  "backend": "http",
+  "endpoint": "https://tts.example.com/v1/audio/speech",
+  "api_key_env": "TLEGADO_TTS_API_KEY",
+  "model": "your-tts-model",
+  "voice": "your-voice",
+  "response_format": "wav",
+  "timeout_seconds": 45,
+  "retries": 1,
+  "cache_max_mb": 256,
+  "prefetch": false
+}

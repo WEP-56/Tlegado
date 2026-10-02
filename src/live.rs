@@ -1128,6 +1128,9 @@ impl App {
                     Err(error) => {
                         self.live.as_mut().unwrap().status =
                             "章节加载失败，正文保留；可重新选择章节重试".into();
+                        if let Some(reader) = &mut self.reader {
+                            reader.aloud_chapter_failed();
+                        }
                         self.toast(error, ToastTone::Err);
                     }
                 }
@@ -1817,6 +1820,60 @@ mod tests {
                 assert!(!text.contains("38.2 MB"));
             }
         }
+    }
+
+    #[test]
+    fn aloud_live_controls_preserve_progress_and_show_chapter_errors() {
+        let (mut app, _) = reader_app();
+        app.reader.as_mut().unwrap().set_real(
+            vec!["第一章".into(), "第二章".into()],
+            "原章第一段\n原章第二段".into(),
+            0,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        key(&mut app, KeyCode::Char('p'));
+        assert!(app.reader.as_ref().unwrap().aloud_active());
+        key(&mut app, KeyCode::Char('a'));
+        assert!(app.commands.is_empty());
+        key(&mut app, KeyCode::Char(']'));
+        let position = app.reader.as_ref().unwrap().position();
+        assert_eq!(position, "原章第一段\n".chars().count());
+        key(&mut app, KeyCode::Char('{'));
+        app.sync_live();
+        let id = app.live.as_ref().unwrap().read_id;
+        assert!(app
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::Chapter { index: 0, .. })));
+        app.apply_live_event(Event::Chapter {
+            id,
+            index: 0,
+            end: false,
+            result: Err("连接超时".into()),
+        });
+        let reader = app.reader.as_ref().unwrap();
+        assert_eq!(reader.chapter, 1);
+        assert!(reader.aloud_active() && !reader.aloud_playing() && !reader.aloud_loading());
+        let frame = terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let text = frame
+            .buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace(' ', "");
+        assert!(text.contains("连接超时") && text.contains("继续"));
+        key(&mut app, KeyCode::Char('s'));
+        assert!(!app.reader.as_ref().unwrap().aloud_active());
+        assert!(app.live.as_ref().unwrap().picker.is_none());
+        key(&mut app, KeyCode::Char('p'));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.reader.is_none());
+        assert!(app
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::Progress { index: 1, position: saved, .. } if *saved == position)));
     }
 
     #[test]

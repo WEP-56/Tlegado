@@ -466,13 +466,15 @@ mod tests {
 
     #[test]
     fn thousands_of_sources_keep_navigation_bounded_and_exploration_reachable() {
+        let base_count = fixture(0).nav.len();
         let mut app = fixture(3000);
-        assert_eq!(app.nav.len(), 10);
+        assert_eq!(app.nav.len(), base_count);
+        assert!(app.nav.iter().any(|item| item.id == "set:tts"));
         app.goto_id("discover:sources");
         key(&mut app, KeyCode::End);
         key(&mut app, KeyCode::Enter);
         assert!(matches!(app.route(), Route::Discover { source_idx: 2999 }));
-        assert_eq!(app.nav.len(), 11);
+        assert_eq!(app.nav.len(), base_count + 1);
         key(&mut app, KeyCode::Backspace);
         assert!(matches!(app.route(), Route::ExploreSources));
         assert_eq!(app.source_browser.cursor, 2999);

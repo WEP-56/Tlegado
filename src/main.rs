@@ -1,5 +1,6 @@
 //! Tlegado: native terminal reader with a headless Legado core.
 mod app;
+mod audio;
 mod backend;
 mod book_logo;
 mod data;
@@ -18,7 +19,10 @@ mod ui;
 use anyhow::Result;
 use app::App;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -44,6 +48,10 @@ const HELP: &str = "Tlegado — Legado 书源终端阅读器
 e 发现开关、E 关闭发现、x 确认删除、i 导入、o 导出全部、v 查看 JSON。
 发现书源统一在“发现书源”列表中选择，分类页 Backspace 返回列表。
 / 搜索；Enter 试读，阅读中 a 加入书架并保存当前位置；[ / ] 切章，q 返回。
+阅读中 p 听书；听书时 p/空格 暂停继续，[ / ] 切段，{ / } 切章，s 停止。
+听书 -/+ 调速，t 定时停止；TLEGADO_TTS_VOICE 可指定系统声音，Linux 需 espeak-ng。
+--tts-config 文件.json 选择 BYOK；或设置 TLEGADO_TTS_CONFIG，或在数据目录放置 tts.json。
+侧栏“听书设置”可配置系统声音、HTTP 接口与密钥；Ctrl+S 保存后立即生效。
 搜索/分类页 n 加载后续页，r 重试失败页；s 选择候选书源，阅读中 s 换源。
 Esc 取消后台读取；Ctrl+C 保存进度并退出。--demo 为原离线演示。
 ";
@@ -54,6 +62,7 @@ fn restore_terminal() {
         stdout(),
         LeaveAlternateScreen,
         DisableMouseCapture,
+        DisableBracketedPaste,
         crossterm::cursor::Show
     );
 }
@@ -91,6 +100,10 @@ fn main() -> Result<()> {
         });
     }
     install_panic_hook((!options.demo).then_some(options.data_dir.as_path()))?;
+    let audio_config = audio::Config::load(&options.data_dir, options.tts_config.as_deref())?;
+    let audio_path = audio::Config::path(&options.data_dir, options.tts_config.as_deref());
+    let audio_cache =
+        (!options.data_dir.as_os_str().is_empty()).then(|| options.data_dir.join("tts-cache"));
     let bridge = if options.demo {
         None
     } else {
@@ -111,6 +124,7 @@ fn main() -> Result<()> {
     } else {
         App::new_live()
     };
+    app.tts = audio::settings::Settings::new(audio_config.clone(), audio_path);
     let result = (|| -> Result<()> {
         enable_raw_mode()?;
         let _session = TerminalSession;
@@ -118,7 +132,13 @@ fn main() -> Result<()> {
         execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
         let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
         terminal.clear()?;
-        run(&mut terminal, &mut app, bridge.as_ref())
+        run(
+            &mut terminal,
+            &mut app,
+            bridge.as_ref(),
+            audio_config,
+            audio_cache,
+        )
     })();
     app.save_live_progress();
     let flush = dispatch(&mut app, bridge.as_ref());
@@ -168,22 +188,69 @@ fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     bridge: Option<&jobs::Bridge>,
+    audio_config: audio::Config,
+    audio_cache: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    let mut audio = audio::Controller::new(audio_config, audio_cache.clone())?;
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
+    let mut bracketed_paste = false;
     loop {
         if let Some(bridge) = bridge {
             for event in bridge.poll().take(64) {
                 app.apply_live_event(event);
             }
         }
+        if let Some(config) = app.tts.pending.take() {
+            match audio::Controller::new(config, audio_cache.clone()) {
+                Ok(next) => {
+                    audio = next;
+                    app.tts.error = false;
+                    app.tts.message = if app.tts.path.is_some() {
+                        "听书配置已保存并生效"
+                    } else {
+                        "听书配置已在本次运行生效（未写入磁盘）"
+                    }
+                    .into();
+                }
+                Err(error) => {
+                    app.tts.error = true;
+                    app.tts.message = format!("配置已保存，但应用失败，请重试保存：{error}");
+                }
+            }
+        }
+        audio.sync(app);
         app.sync_live();
         dispatch(app, bridge)?;
+        let editing_tts = !app.boss_mode
+            && app.reader.is_none()
+            && !app.help
+            && app.focus == app::Focus::Main
+            && matches!(app.route(), app::Route::Tts)
+            && app.tts.editing();
+        if editing_tts != bracketed_paste {
+            if editing_tts {
+                execute!(terminal.backend_mut(), EnableBracketedPaste)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableBracketedPaste)?;
+            }
+            bracketed_paste = editing_tts;
+        }
         terminal.draw(|f| ui::draw(f, app))?;
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+                Event::Paste(text)
+                    if !app.boss_mode
+                        && app.reader.is_none()
+                        && !app.help
+                        && app.focus == app::Focus::Main
+                        && matches!(app.route(), app::Route::Tts) =>
+                {
+                    app.tts.paste(&text)
+                }
+                Event::Mouse(_) if editing_tts => {}
                 Event::Mouse(m) => {
                     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
                     let key = match m.kind {
@@ -202,6 +269,7 @@ fn run(
             app.on_tick();
             last_tick = Instant::now();
         }
+        audio.sync(app);
         app.sync_live();
         dispatch(app, bridge)?;
         if app.should_quit {

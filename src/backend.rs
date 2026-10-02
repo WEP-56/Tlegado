@@ -435,6 +435,7 @@ pub fn parse_sources(raw: &str) -> Result<Vec<BookSource>> {
 
 #[derive(Default, Debug)]
 pub struct Options {
+    pub tts_config: Option<PathBuf>,
     pub data_dir: PathBuf,
     pub imports: Vec<PathBuf>,
     pub local_imports: Vec<PathBuf>,
@@ -458,6 +459,9 @@ impl Options {
                     .imports
                     .push(args.next().context("--import-source 缺少路径")?.into()),
                 Some("--demo") => result.demo = true,
+                Some("--tts-config") => {
+                    result.tts_config = Some(args.next().context("--tts-config 缺少路径")?.into())
+                }
                 Some("--import-rules") => result.rule_imports.push(
                     args.next()
                         .context("--import-rules 缺少路径或 URL")?

@@ -1,0 +1,21 @@
+{
+  "backend": "http",
+  "endpoint": "https://tts.example.com/synthesize",
+  "model": "your-model",
+  "voice": "your-voice",
+  "response_format": "mp3",
+  "header_env": {
+    "x-api-key": "TLEGADO_TTS_API_KEY"
+  },
+  "body_template": {
+    "text": "{{text}}",
+    "model_id": "{{model}}",
+    "voice": "{{voice}}",
+    "format": "{{format}}",
+    "speed": "{{speed}}"
+  },
+  "timeout_seconds": 45,
+  "retries": 1,
+  "cache_max_mb": 256,
+  "prefetch": false
+}
